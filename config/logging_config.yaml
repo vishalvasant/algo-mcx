@@ -1,0 +1,3 @@
+level: INFO
+format: json
+log_dir: /var/log/algomcx

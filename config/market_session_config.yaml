@@ -1,0 +1,5 @@
+timezone: Asia/Kolkata
+market_open: "09:00"
+market_close: "23:30"
+pre_warm_minutes: 5
+holidays_file: config/mcx_holidays.json

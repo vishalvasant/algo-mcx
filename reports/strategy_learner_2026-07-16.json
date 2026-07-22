@@ -1,0 +1,106 @@
+{
+  "multipliers": {
+    "delta_momentum": 1.0,
+    "vwap_reclaim": 0.75,
+    "vwap_bounce": 0.75,
+    "ema_pullback": 0.75,
+    "vwap_rejection": 1.0,
+    "vwap_pullback": 0.75,
+    "opening_range_breakout": 0.75,
+    "trend_reversal_flip": 1.0,
+    "cpr_breakout": 1.0,
+    "trend_continuation": 1.0,
+    "momentum_continuation": 1.0
+  },
+  "stats": {
+    "delta_momentum": {
+      "trades": 7,
+      "wins": 2,
+      "losses": 5,
+      "pnl": 908.7,
+      "win_rate": 0.286,
+      "expectancy": 129.81
+    },
+    "vwap_reclaim": {
+      "trades": 8,
+      "wins": 2,
+      "losses": 6,
+      "pnl": -2811.25,
+      "win_rate": 0.25,
+      "expectancy": -351.41
+    },
+    "vwap_bounce": {
+      "trades": 5,
+      "wins": 0,
+      "losses": 5,
+      "pnl": -6512.67,
+      "win_rate": 0.0,
+      "expectancy": -1302.53
+    },
+    "ema_pullback": {
+      "trades": 8,
+      "wins": 1,
+      "losses": 7,
+      "pnl": -6340.75,
+      "win_rate": 0.125,
+      "expectancy": -792.59
+    },
+    "vwap_rejection": {
+      "trades": 6,
+      "wins": 1,
+      "losses": 5,
+      "pnl": -3348.32,
+      "win_rate": 0.167,
+      "expectancy": -558.05
+    },
+    "vwap_pullback": {
+      "trades": 7,
+      "wins": 2,
+      "losses": 5,
+      "pnl": -3465.48,
+      "win_rate": 0.286,
+      "expectancy": -495.07
+    },
+    "opening_range_breakout": {
+      "trades": 8,
+      "wins": 0,
+      "losses": 8,
+      "pnl": -11347.53,
+      "win_rate": 0.0,
+      "expectancy": -1418.44
+    },
+    "trend_reversal_flip": {
+      "trades": 3,
+      "wins": 1,
+      "losses": 2,
+      "pnl": 1693.25,
+      "win_rate": 0.333,
+      "expectancy": 564.42
+    },
+    "cpr_breakout": {
+      "trades": 4,
+      "wins": 1,
+      "losses": 3,
+      "pnl": -3753.1,
+      "win_rate": 0.25,
+      "expectancy": -938.27
+    },
+    "trend_continuation": {
+      "trades": 4,
+      "wins": 2,
+      "losses": 2,
+      "pnl": -856.7,
+      "win_rate": 0.5,
+      "expectancy": -214.17
+    },
+    "momentum_continuation": {
+      "trades": 2,
+      "wins": 0,
+      "losses": 2,
+      "pnl": -2088.61,
+      "win_rate": 0.0,
+      "expectancy": -1044.31
+    }
+  },
+  "updated_at": "2026-07-16T16:26:05.812864+00:00"
+}

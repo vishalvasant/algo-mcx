@@ -1,0 +1,24 @@
+# Exit when momentum / structure turns unfavorable (not fixed ₹ SL/target).
+# Priority: trend reversal → early_invalidation → adverse → trail → time stop.
+mode: momentum
+bias_flip_exit: true
+bias_flip_buffer_points: 10
+flip_on_trend_reversal: false
+
+# Wait longer before any exit evaluation (avoids tick noise right after fill).
+min_hold_seconds: 30
+max_hold_minutes: 20
+
+# Early cut when trade never went green (caps adverse_momentum traps).
+early_invalidation_enabled: true
+early_invalidation_min_hold_seconds: 45
+# MFE never reached this % of entry → still "no green"
+early_invalidation_max_mfe_pct: 3
+# Cut if loss reaches this % while never green (vs full adverse 12%).
+early_invalidation_loss_pct: 7
+
+trail_giveback_pct: 35
+adverse_move_pct_from_entry: 12
+min_profit_before_trail_pct: 12
+high_vol_trail_giveback_pct: 30
+high_vol_adverse_move_pct_from_entry: 10

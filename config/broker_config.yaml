@@ -1,0 +1,5 @@
+api_base_url: "https://piconnect.flattrade.in/PiConnectAPI/"
+websocket_url: "wss://piconnect.flattrade.in/PiConnectWSAPI/"
+reconnect_backoff_seconds: [1, 2, 4, 8, 16, 32, 60]
+stale_feed_seconds: 5
+token_refresh_before_expiry_minutes: 30

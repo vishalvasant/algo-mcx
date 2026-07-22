@@ -1,0 +1,46 @@
+# MCX commodity options — Gold, Silver, Natural Gas (Flattrade / MCX)
+underlying: GOLD
+exchange_spot: MCX
+exchange_options: MCX
+spot_token: ""
+expiry_type: weekly
+atm_strike_steps: 5
+strike_band_points: 2500
+strike_step: 500
+tradable_strike: ATM
+instrument_filter: OPTFUT
+
+underlyings:
+  - symbol: GOLD
+    display_name: Gold
+    option_prefix: GOLD
+    option_search_text: "GOLD OPT"
+    spot_search_text: GOLDM
+    spot_token: ""
+    strike_step: 500
+    strike_band_points: 2500
+    atm_strike_steps: 5
+    tick_size: 1
+    fallback_spot: 145500
+  - symbol: SILVER
+    display_name: Silver
+    option_prefix: SILVER
+    option_search_text: "SILVER OPT"
+    spot_search_text: SILVER
+    spot_token: ""
+    strike_step: 1000
+    strike_band_points: 5000
+    atm_strike_steps: 5
+    tick_size: 1
+    fallback_spot: 231000
+  - symbol: NATURALGAS
+    display_name: Natural Gas
+    option_prefix: NATURALGAS
+    option_search_text: "NATURALGAS CE"
+    spot_search_text: NATURALGAS
+    spot_token: ""
+    strike_step: 5
+    strike_band_points: 25
+    atm_strike_steps: 5
+    tick_size: 0.05
+    fallback_spot: 280

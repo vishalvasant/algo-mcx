@@ -1,0 +1,5 @@
+# Copy to docker-compose.override.yml for local Mac customizations.
+services:
+  trading-engine:
+    volumes:
+      - ./trading-engine/src:/app/src:ro

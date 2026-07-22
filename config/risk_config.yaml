@@ -1,0 +1,26 @@
+account_capital_inr: 50000
+# Each new entry may use up to this % of currently available capital.
+max_premium_pct_of_available: 65
+# Total deployed premium cap as % of equity (starting + realized P&L).
+max_deployed_pct_of_equity: 85
+default_lots: 1
+confidence_lot_sizing:
+  enabled: true
+  max_lots: 2
+  tiers:
+    - min_confidence: 80
+      lots: 1
+    - min_confidence: 88
+      lots: 2
+    - min_confidence: 95
+      lots: 2
+# 0 = unlimited trade count (UI "20 closed" was display-only, not a trade cap).
+max_trades_per_day: 0
+max_concurrent_positions: 1
+# Pause new entries after this many consecutive losses (0 = disabled).
+max_consecutive_losses: 3
+# Soft daily loss brake in ₹ (0 = disabled). ~4% of capital.
+max_daily_loss: 2000
+force_exit_time: "23:00"
+cooldown_after_exit_minutes: 8
+kill_switch_flatten: true

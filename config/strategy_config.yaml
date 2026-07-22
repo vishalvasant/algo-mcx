@@ -1,0 +1,73 @@
+active_scanner: router
+strategy_version: strategy_router_v2.2.0_mtf_wait_early_exit
+
+# Rule-based router (no LLM). Pick one strategy or NO_TRADE.
+router:
+  min_confidence: 80
+  log_every_decision: true
+  # High-quality core — wait for confirmation; weak aliases disabled.
+  enabled_strategies:
+    - vwap_reclaim
+    - vwap_pullback
+    - vwap_rejection
+    - opening_range_breakout
+    - momentum_continuation
+    - vwap_trend
+    - trend_day
+    - gap_and_go
+    - pdh_pdl_break
+    - expiry_scalping
+
+# Multi-TF candle patterns (Phase A–C) — wait until structure aligns.
+mtf_patterns:
+  enabled: true
+  min_score_to_trade: 55
+  # Soft boost above this (already in quality gate).
+  boost_score: 75
+
+regime:
+  high_vol_atr_mult: 1.4
+  low_vol_atr_mult: 0.7
+  atr_lookback_bars: 14
+  sideways_range_points: 25
+  structure_lookback_5m: 6
+  block_sideways: true
+  block_high_volatility: false
+  max_risk_score_to_trade: 75
+  opening_phase_minutes: 30
+  late_phase_after_minutes: 330
+
+vwap_reclaim:
+  bias_timeframe: 5m
+  setup_timeframe: 3m
+  trigger_timeframe: 1m
+  setup_lookback_bars: 8
+  trigger_lookback_bars: 5
+  max_distance_to_vwap_points: 30
+  neutral_bias_blocks_trade: true
+
+vwap_pullback:
+  setup_timeframe: 3m
+  trigger_timeframe: 1m
+  setup_lookback_bars: 10
+  # Stronger extension before pullback is valid (wait for real move).
+  min_extension_points: 12
+  max_distance_to_vwap_points: 22
+  trigger_lookback_bars: 4
+  neutral_bias_blocks_trade: true
+
+vwap_trend:
+  min_bars_on_side: 4
+  min_distance_to_vwap_points: 10
+  max_distance_to_vwap_points: 40
+  require_1m_momentum: true
+  neutral_bias_blocks_trade: true
+
+strike_selection:
+  enabled: true
+  atm_band_steps: 1
+  target_delta: 0.50
+  delta_min: 0.40
+  delta_max: 0.65
+  prefer_higher_gamma: true
+  max_spread_pct: 8

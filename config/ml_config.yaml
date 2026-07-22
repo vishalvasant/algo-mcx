@@ -1,0 +1,4 @@
+enabled: false
+mode: shadow
+model_path: null
+score_threshold: 0.6

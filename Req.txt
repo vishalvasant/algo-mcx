@@ -1,0 +1,292 @@
+Build a production-style hybrid intraday options trading system architecture for Indian index options using Flattrade API.
+
+Context:
+- Broker: Flattrade
+- Primary market for V1: NSE
+- V2 extension: BSE / SENSEX later
+- Instruments for V1: NIFTY weekly expiry options only
+- Trading style: intraday only
+- Holding period: few minutes maximum
+- Core idea: read index structure from 1-minute, 3-minute, and 5-minute candles, then monitor option-side live data and Greeks if available through Flattrade WebSocket/API, execute trade immediately when conditions pass, monitor open position live, and exit via rules.
+- Current problem: existing rules either take wrong trades or fail to find trades. So do NOT start with random strategy rules. First design proper architecture.
+
+Important broker assumptions:
+- Flattrade provides:
+  - historical data API
+  - live market data WebSocket
+  - trading / order APIs
+  - order monitoring and position/order event handling
+- Greeks may or may not be fully available as a live websocket stream.
+- Therefore design must support:
+  1. websocket-based Greeks if broker provides them,
+  2. periodic API/snapshot polling fallback if Greeks are not available in stream form,
+  3. optional derived feature mode if some Greeks are unavailable directly.
+- Architecture must be paper-trade first, live-trade later.
+- Build rule-first, ML-second.
+- ML must be optional and only used later as a candidate quality filter after enough labeled paper-trade data is collected.
+
+What I need:
+Design the full tool architecture first, not just code snippets.
+
+Output required:
+1. High-level architecture
+2. Module-by-module responsibilities
+3. Data flow between modules
+4. Event flow for live trading
+5. Database schema / tables
+6. Recommended file/folder structure
+7. Config schema
+8. Paper trading workflow
+9. Live trading workflow
+10. Optional ML filter integration design
+11. Failure handling and broker reconnect logic
+12. Logging, analytics, and audit trail fields
+13. Minimal V1 scope
+14. Future V2 extensions
+
+Architecture rules:
+- Keep market data, feature generation, signal detection, validation, risk, execution, position management, and analytics as separate modules.
+- Do not mix signal generation with trade execution.
+- Every rejected candidate trade must be stored with rejection reason.
+- Every executed trade must store signal snapshot, order timing, fill timing, slippage, MFE, MAE, and exit reason.
+- Position manager must be separate from entry logic.
+- Risk engine must always override ML and signal engine.
+- No live deployment assumptions until paper trading metrics are validated.
+
+Required modules:
+1. Broker Adapter
+   - Flattrade authentication/session handling
+   - historical candles fetch
+   - live quote websocket subscription
+   - order placement / cancel / modify
+   - order updates / trade updates subscription
+   - reconnect logic and stale-feed detection
+   - support broker API V2 style constraints where relevant
+
+2. Market Data Engine
+   - normalize Flattrade candle data for 1m, 3m, 5m
+   - maintain live market state for NIFTY and selected option contracts
+   - maintain quote freshness timestamp
+   - support fallback polling for fields not available by websocket
+   - separate price-stream fields vs snapshot fields
+
+3. Option Data / Greeks Layer
+   - detect whether Greeks are available in websocket stream
+   - if yes, consume them in real time
+   - if not, use periodic API polling / snapshot refresh
+   - if some fields are missing, mark them unavailable and continue with degraded mode
+   - track availability flags per field: IV, delta, gamma, theta, vega, OI, volume, bid/ask
+   - expose unified normalized option-state object to downstream modules
+
+4. Feature Engine
+   - compute index trend bias from 5m
+   - compute setup context from 3m
+   - compute entry trigger context from 1m
+   - compute option spread %, liquidity, volume, OI change, IV / Greeks if available
+   - compute session and expiry context
+   - support fallback-safe features if some option-side fields are unavailable
+
+5. Rule Scanner
+   - detect candidate setups only
+   - examples: breakout continuation, VWAP reclaim, rejection reversal
+   - must produce candidate signal objects, not orders
+
+6. Rule Validator
+   - time window filter
+   - spread filter
+   - liquidity filter
+   - expiry filter
+   - regime filter
+   - cooldown filter
+   - one-position-at-a-time filter
+   - risk pre-check
+   - field-availability check
+   - store reject reason for every failed candidate
+
+7. Optional ML Filter
+   - disabled in V1 by default
+   - input = validated candidate signal only
+   - output = score, take/skip recommendation, confidence
+   - shadow mode support
+   - no black-box direct execution
+
+8. Risk Engine
+   - max daily loss
+   - max loss per trade
+   - max trades per day
+   - max consecutive losses
+   - force exit time
+   - cooldown after stop loss
+   - kill switch
+
+9. Execution Engine
+   - convert approved signal into broker order instructions
+   - support limit / market-protected style logic depending on broker/API capability
+   - monitor order status
+   - handle rejection, partial fill, retry, and cancel logic
+   - log latency and slippage
+
+10. Position Manager
+   - monitor open position live
+   - stop-loss
+   - target
+   - time stop
+   - momentum failure exit
+   - force square-off by time
+   - emergency exit if feed stale or broker state mismatch
+
+11. Journal / Analytics
+   - store all candidate signals
+   - store all validation failures
+   - store approved trades
+   - store order lifecycle
+   - store position lifecycle
+   - compute expectancy, win rate, avg win/loss, slippage, time-of-day stats, setup-wise stats
+
+Required database tables:
+- candles_1m
+- candles_3m
+- candles_5m
+- option_quotes
+- option_snapshots
+- option_features
+- candidate_signals
+- validation_results
+- ml_scores
+- orders
+- positions
+- closed_trades
+- daily_risk_state
+- system_events
+- field_availability_log
+
+Required config files:
+- broker_config
+- symbols_config
+- strategy_config
+- validator_config
+- risk_config
+- execution_config
+- logging_config
+- ml_config
+- data_availability_config
+
+Important design requirements:
+- Build V1 only for NIFTY weekly options first.
+- Keep SENSEX as future extension.
+- One strategy only in V1.
+- One open trade at a time.
+- Paper trading mode must be first-class.
+- Add shadow-mode ML scoring for future.
+- Use Python as primary language.
+- Suggest libraries, but keep broker integration abstract enough to swap later.
+- Make all modules testable independently.
+- Design around current broker/API compliance realities like static IP / broker-managed restrictions where relevant.
+- Do not assume third-party hosted execution is freely allowed; keep broker-facing integration modular.
+
+Need from you:
+- Return the architecture in a structured technical blueprint.
+- Include example event objects for:
+  1. candle update
+  2. option snapshot update
+  3. candidate signal
+  4. validation result
+  5. execution request
+  6. order update
+  7. position update
+  8. trade close summary
+- Include a sample JSON config schema for V1.
+- Include exact recommended development phases:
+  Phase 1: data + journaling
+  Phase 2: rule scanner + validator
+  Phase 3: paper trading execution
+  Phase 4: analytics review
+  Phase 5: optional ML shadow filter
+  Phase 6: controlled live deployment
+
+Do not produce generic trading advice.
+Do not jump into advanced ML.
+Do not create a final strategy with many indicators.
+Focus on system architecture, testability, failure isolation, field availability validation, and paper-trade-first design.
+
+================================================================================
+LOCKED V1 DECISIONS (agreed — do not change without explicit discussion)
+================================================================================
+
+Broker API:
+- Flattrade Pi API: https://pi.flattrade.in/docs
+- Official Python reference: https://github.com/flattrade/pythonAPI
+
+Contract selection:
+- NIFTY weekly expiry only
+- Monitor strike band: ATM -300 to ATM +300 (50-point strikes = 13 strikes, 26 option contracts)
+- Trade only ATM strike
+- Side selection: 5m index bias picks CE (bullish) or PE (bearish)
+- Contract selector module resolves weekly expiry, tokens, and ATM strike from live NIFTY spot
+
+V1 strategy:
+- VWAP reclaim only (breakout continuation and rejection reversal are V2 plugin slots)
+- 5m: directional bias vs session VWAP
+- 3m: setup context (dip/rally vs VWAP)
+- 1m: entry trigger (confirmed reclaim bar)
+- Exact thresholds are config-driven; tune during paper trading Phase 4
+
+Paper trading:
+- Fill model: LTP at signal/exit time
+- Instant full fill, no partials in paper
+- slippage field = fill_price - reference_ltp (typically 0 in paper)
+
+Infrastructure:
+- Primary language: Python
+- Database: PostgreSQL from day one
+- Local dev: Mac with Docker Compose
+- Production live deploy: same Docker Compose on server with static IP registered with Flattrade
+- Paper trading and analytics may run on Mac; live order placement requires registered static IP (Flattrade API V2)
+
+Web application (V1):
+- In-app notifications only (no email, no Telegram)
+- Minimal dashboard: open position, today's trades, rejections, daily P&L
+- Notification center: risk breach, kill switch, stale feed, order rejected, position closed
+
+Alerts:
+- Delivered via web app (SSE or WebSocket from web API)
+- Optional Redis pub/sub between trading-engine and web-app
+
+Flattrade capability notes (verified against Pi docs):
+- Historical candles: get_time_price_series supports intrv 1, 3, 5, 10, 15, 30, 60, ...
+- WebSocket touchline: LTP, volume, bid/ask, OI (oi, poi, toi) — no live Greeks
+- get_quotes: price/volume/OI fields — no Greeks
+- get_option_chain: contract metadata (token, strike, lot size) — use for contract master
+- Orders: REST place_order — LMT, MKT, SL-LMT, SL-MKT
+- Order updates: same WebSocket as market data
+- API V2: orders only from registered static IP; non-registered algo: limit/SL-limit only, <10 orders/sec
+- Daily OAuth token refresh required
+- Greeks layer V1: mark iv/delta/gamma/theta/vega as broker-unavailable; derived Greeks optional in V2+
+
+Architecture deliverable:
+- Full technical blueprint: ARCHITECTURE.md (modules, flows, schema, config, events, phases)
+
+Additional modules (beyond original list):
+12. Contract Selector — weekly expiry, ATM band, tradable ATM CE/PE per bias
+13. Web Application — dashboard + in-app notification center
+
+Additional database tables:
+- instruments (contract master)
+- broker_sessions
+- notifications
+- reconciliation_log (or subtype of system_events)
+
+Additional config files:
+- paper_trading_config
+- market_session_config
+- runtime_config
+- docker / deployment env contract (not committed secrets)
+
+Development phases (updated):
+- Phase 0: Flattrade spike (auth, candles, WS, option chain, paper path)
+- Phase 1: Docker + Postgres + data engine + contract selector + journaling
+- Phase 2: Feature engine + VWAP reclaim scanner + validator
+- Phase 3: Paper execution (LTP fills) + position manager
+- Phase 4: Web app + in-app notifications + analytics review
+- Phase 5: Optional ML shadow filter
+- Phase 6: Controlled live deployment on static-IP server

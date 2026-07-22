@@ -1,0 +1,133 @@
+{
+  "multipliers": {
+    "delta_momentum": 0.75,
+    "vwap_reclaim": 0.75,
+    "trend_reversal_flip": 0.75,
+    "vwap_bounce": 0.75,
+    "ema_pullback": 0.75,
+    "vwap_rejection": 1.0,
+    "opening_range_breakout": 0.75,
+    "vwap_pullback": 1.0,
+    "momentum_continuation": 1.0,
+    "trend_continuation": 1.0,
+    "oi_breakout": 1.0,
+    "cpr_breakout": 1.0,
+    "trend_day": 1.0,
+    "vwap_trend": 1.0
+  },
+  "stats": {
+    "delta_momentum": {
+      "trades": 10,
+      "wins": 3,
+      "losses": 7,
+      "pnl": -78.45,
+      "win_rate": 0.3,
+      "expectancy": -7.85
+    },
+    "vwap_reclaim": {
+      "trades": 11,
+      "wins": 5,
+      "losses": 6,
+      "pnl": -362.24,
+      "win_rate": 0.455,
+      "expectancy": -32.93
+    },
+    "trend_reversal_flip": {
+      "trades": 11,
+      "wins": 5,
+      "losses": 6,
+      "pnl": -5838.16,
+      "win_rate": 0.455,
+      "expectancy": -530.74
+    },
+    "vwap_bounce": {
+      "trades": 8,
+      "wins": 2,
+      "losses": 6,
+      "pnl": -2501.04,
+      "win_rate": 0.25,
+      "expectancy": -312.63
+    },
+    "ema_pullback": {
+      "trades": 9,
+      "wins": 3,
+      "losses": 6,
+      "pnl": -5149.13,
+      "win_rate": 0.333,
+      "expectancy": -572.13
+    },
+    "vwap_rejection": {
+      "trades": 28,
+      "wins": 11,
+      "losses": 17,
+      "pnl": 5635.82,
+      "win_rate": 0.393,
+      "expectancy": 201.28
+    },
+    "opening_range_breakout": {
+      "trades": 9,
+      "wins": 1,
+      "losses": 8,
+      "pnl": -9890.25,
+      "win_rate": 0.111,
+      "expectancy": -1098.92
+    },
+    "vwap_pullback": {
+      "trades": 67,
+      "wins": 32,
+      "losses": 35,
+      "pnl": 31491.46,
+      "win_rate": 0.478,
+      "expectancy": 470.02
+    },
+    "momentum_continuation": {
+      "trades": 30,
+      "wins": 12,
+      "losses": 18,
+      "pnl": 10704.49,
+      "win_rate": 0.4,
+      "expectancy": 356.82
+    },
+    "trend_continuation": {
+      "trades": 4,
+      "wins": 0,
+      "losses": 4,
+      "pnl": -958.02,
+      "win_rate": 0.0,
+      "expectancy": -239.5
+    },
+    "oi_breakout": {
+      "trades": 1,
+      "wins": 1,
+      "losses": 0,
+      "pnl": 3418.83,
+      "win_rate": 1.0,
+      "expectancy": 3418.83
+    },
+    "cpr_breakout": {
+      "trades": 3,
+      "wins": 0,
+      "losses": 3,
+      "pnl": -6514.29,
+      "win_rate": 0.0,
+      "expectancy": -2171.43
+    },
+    "trend_day": {
+      "trades": 9,
+      "wins": 2,
+      "losses": 7,
+      "pnl": 255.93,
+      "win_rate": 0.222,
+      "expectancy": 28.44
+    },
+    "vwap_trend": {
+      "trades": 1,
+      "wins": 1,
+      "losses": 0,
+      "pnl": 1563.47,
+      "win_rate": 1.0,
+      "expectancy": 1563.47
+    }
+  },
+  "updated_at": "2026-07-20T13:39:22.573475+00:00"
+}

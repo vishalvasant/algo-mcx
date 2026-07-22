@@ -1,0 +1,41 @@
+validator_version: validator_v1.3.0_mtf_wait
+entry_start_time: "10:00"
+entry_end_time: "22:45"
+max_spread_pct: 1.5
+min_option_volume: 100000
+min_option_oi: 500000
+expiry_day_block_entries: true
+cooldown_after_exit_minutes: 8
+paper_relaxed_liquidity: true
+required_fields:
+  - ltp
+  - bid
+  - ask
+  - oi
+
+trap_avoidance:
+  enabled: true
+  require_spot_vwap_alignment: true
+  spot_vwap_buffer_points: 12
+  blocked_setups:
+    - vwap_bounce
+    - mean_reversion
+    - liquidity_sweep
+    - reversal
+    - ema_pullback
+  require_ema_alignment_for:
+    - vwap_pullback
+    - trend_continuation
+    - vwap_trend
+    - momentum_continuation
+  block_reversal_flips: true
+  max_confidence_if_spot_vwap_against: 70
+  require_bias_side_match: true
+  require_1m_5m_bias_agree: true
+  require_5m_structure_align: true
+  require_3m_bars_with_bias: true
+  min_3m_bars_with_bias: 2
+  require_pullback_trigger: true
+  # Phase B/C — wait until multi-TF candle score is good enough.
+  require_mtf_alignment: true
+  min_mtf_score: 55
