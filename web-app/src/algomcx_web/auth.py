@@ -25,7 +25,7 @@ class AuthSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=_resolve_env_file(), extra="ignore")
 
     web_username: str = "admin"
-    web_password: str = "algoflat"
+    web_password: str = "algomcx"
     jwt_secret: str = "change-me-in-production"
     jwt_expire_hours: int = 24
 

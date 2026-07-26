@@ -1,7 +1,7 @@
 """Technical indicators for institutional rulebook features."""
 from __future__ import annotations
 
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
@@ -33,26 +33,41 @@ def ema_series(values: list[Decimal], period: int) -> list[Decimal | None]:
   return out
 
 
+def _ist_bucket_start(ts: datetime, minutes: int) -> datetime:
+  """Floor a timestamp to the IST session grid (e.g. 09:15, 09:30 for 15m)."""
+  ist = ts.astimezone(IST)
+  minute_of_day = ist.hour * 60 + ist.minute
+  floored = (minute_of_day // minutes) * minutes
+  bucket_ist = ist.replace(
+    hour=floored // 60,
+    minute=floored % 60,
+    second=0,
+    microsecond=0,
+  )
+  return bucket_ist.astimezone(timezone.utc)
+
+
 def aggregate_from_m5(m5: list[Candle], minutes: int = 15) -> list[Candle]:
-  """Build higher-TF bars from 5m (15m = 3×5m)."""
+  """Build higher-TF bars from 5m aligned to IST clock buckets."""
   if not m5 or minutes < 5 or minutes % 5 != 0:
     return []
-  n = minutes // 5
+  buckets: dict[datetime, list[Candle]] = {}
+  for c in sorted(m5, key=lambda x: x.ts):
+    start = _ist_bucket_start(c.ts, minutes)
+    buckets.setdefault(start, []).append(c)
   out: list[Candle] = []
-  for i in range(0, len(m5) - n + 1, n):
-    chunk = m5[i : i + n]
-    if len(chunk) < n:
-      break
+  for start in sorted(buckets.keys()):
+    chunk = buckets[start]
     out.append(
       Candle(
         instrument_token=chunk[0].instrument_token,
-        ts=chunk[0].ts,
+        ts=start,
         open=chunk[0].open,
         high=max(c.high for c in chunk),
         low=min(c.low for c in chunk),
         close=chunk[-1].close,
         volume=sum((c.volume or 0) for c in chunk) or None,
-        interval=CandleInterval.M5,  # logical 15m; reuse enum
+        interval=CandleInterval.M5,
       )
     )
   return out

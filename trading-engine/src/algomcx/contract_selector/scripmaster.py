@@ -119,6 +119,26 @@ def instruments_from_scripmaster(
   return instruments
 
 
+def futures_tokens_for_underlying(
+  *,
+  underlying: str,
+  exchange: str = "MCX",
+) -> list[str]:
+  """Chart rollover tokens — MCX uses live search; scripmaster CSV not wired yet."""
+  _ = (underlying, exchange)
+  return []
+
+
+def nearest_future_from_scripmaster(
+  *,
+  underlying: str,
+  exchange: str = "MCX",
+  as_of: date | None = None,
+) -> tuple[str, str] | None:
+  _ = (underlying, exchange, as_of)
+  return None
+
+
 def load_weekly_band_from_scripmaster(
   *,
   underlying: str,

@@ -186,6 +186,7 @@ def build_mtf_alignment(
     m5: list[Candle],
     vwap: Decimal | None,
     bias: Bias | None = None,
+    structure_5m: str | None = None,
 ) -> MtfAlignment:
     p1 = detect_tf_patterns(m1, timeframe="1m", vwap=vwap)
     p3 = detect_tf_patterns(m3, timeframe="3m", vwap=vwap)
@@ -213,6 +214,11 @@ def build_mtf_alignment(
 
     score_ce = _combine("CE")
     score_pe = _combine("PE")
+    # When 5m structure already confirms trend, don't let 1m noise drag MTF below entry gates.
+    if structure_5m == "hhhl" and bias == Bias.BULLISH:
+        score_ce = min(100, score_ce + 18)
+    elif structure_5m == "lllh" and bias == Bias.BEARISH:
+        score_pe = min(100, score_pe + 18)
     details = {
         "score_ce": score_ce,
         "score_pe": score_pe,

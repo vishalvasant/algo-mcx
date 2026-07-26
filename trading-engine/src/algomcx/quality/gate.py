@@ -11,6 +11,8 @@ from algomcx.models.events import Bias, CandidateSignal, FeatureSnapshot, Market
 
 IST = ZoneInfo("Asia/Kolkata")
 
+COUNTER_BIAS_SETUPS = frozenset({"peak_reversal_fade"})
+
 # Rulebook §9 component max weights
 WEIGHTS = {
   "spot_vwap": 20,
@@ -52,12 +54,34 @@ class QualityGate:
     chain = extra.get("chain") or {}
     logs: list[str] = []
     components: dict[str, float] = {k: 0.0 for k in WEIGHTS}
+    is_counter = signal.setup_type in COUNTER_BIAS_SETUPS
 
     # --- Spot VWAP (20) ---
     spot = features.nifty_spot
     vwap = features.session_vwap
     if spot is not None and vwap is not None:
-      if signal.side == "CE" and spot > vwap:
+      if is_counter:
+        dist = abs(float(spot - vwap))
+        cb_cfg = self._config.strategy.get("counter_bias") or {}
+        min_ext = float(cb_cfg.get("min_extension_points", 20))
+        if signal.side == "PE" and spot > vwap and dist >= min_ext:
+          components["spot_vwap"] = 18
+          logs.append("counter_spot_extended_pe=+18")
+        elif signal.side == "CE" and spot < vwap and dist >= min_ext:
+          components["spot_vwap"] = 18
+          logs.append("counter_spot_extended_ce=+18")
+        elif extra.get("bias_confidence_mismatch") and (
+          (signal.side == "PE" and spot > vwap) or (signal.side == "CE" and spot < vwap)
+        ):
+          components["spot_vwap"] = 14
+          logs.append("counter_bias_conf_mismatch=+14")
+        elif (signal.side == "PE" and spot > vwap) or (signal.side == "CE" and spot < vwap):
+          components["spot_vwap"] = 10
+          logs.append("counter_spot_fade_mild=+10")
+        else:
+          components["spot_vwap"] = 0
+          logs.append("counter_spot_wrong_side=0")
+      elif signal.side == "CE" and spot > vwap:
         components["spot_vwap"] = 20
         logs.append("spot_vwap_bull=+20")
       elif signal.side == "PE" and spot < vwap:
@@ -92,7 +116,14 @@ class QualityGate:
 
     # --- Market regime (15) ---
     primary = regime.primary
-    if signal.side == "CE" and primary in ("trending_up", "breakout", "low_volatility"):
+    if is_counter:
+      if signal.side == "PE" and primary in ("trending_up", "high_volatility", "breakout"):
+        components["market_regime"] = 12
+      elif signal.side == "CE" and primary in ("trending_down", "high_volatility", "breakout"):
+        components["market_regime"] = 12
+      else:
+        components["market_regime"] = 6
+    elif signal.side == "CE" and primary in ("trending_up", "breakout", "low_volatility"):
       components["market_regime"] = 15
     elif signal.side == "PE" and primary in ("trending_down", "breakout", "low_volatility"):
       components["market_regime"] = 15
@@ -257,26 +288,51 @@ class QualityGate:
     mtf_cfg = self._config.strategy.get("mtf_patterns") or {}
     if mtf_cfg.get("enabled", True):
         extra_mtf = features.extra or {}
-        mtf_score = int(
-            extra_mtf.get("mtf_score_ce" if signal.side == "CE" else "mtf_score_pe") or 0
-        )
-        min_mtf = int(mtf_cfg.get("min_score_to_trade", 55))
-        if mtf_score < min_mtf:
-            conf = min(conf, min_mtf - 1)
-            logs.append(f"mtf_block score={mtf_score}<{min_mtf}")
-        elif mtf_score >= 75:
-            conf = min(100, conf + 3)
-            logs.append(f"mtf_boost=+3 score={mtf_score}")
+        if is_counter:
+            mtf_key = (
+                "counter_mtf_score_ce" if signal.side == "CE" else "counter_mtf_score_pe"
+            )
+            min_mtf = int(
+                (self._config.strategy.get("counter_bias") or {}).get(
+                    "min_counter_mtf_score", 48
+                )
+            )
         else:
-            logs.append(f"mtf_score={mtf_score}")
-        signal.scanner_metadata = {
-            **(signal.scanner_metadata or {}),
-            "mtf_score": mtf_score,
-            "mtf_patterns": extra_mtf.get("mtf_patterns"),
-        }
+            mtf_key = "mtf_score_ce" if signal.side == "CE" else "mtf_score_pe"
+            min_mtf = int(mtf_cfg.get("min_score_to_trade", 55))
+        mtf_raw = extra_mtf.get(mtf_key)
+        if mtf_raw is None:
+            logs.append("mtf_unknown=skip_haircut")
+        else:
+            mtf_score = int(mtf_raw)
+            if mtf_score < min_mtf:
+                # Proportional haircut — do NOT hard-cap at min-1 (that made max conf 54).
+                gap = min_mtf - mtf_score
+                penalty = min(22, int(round(gap * 0.45)))
+                conf = max(0, conf - penalty)
+                logs.append(f"mtf_haircut score={mtf_score}<{min_mtf} -{penalty}")
+            elif mtf_score >= 75:
+                conf = min(100, conf + 3)
+                logs.append(f"mtf_boost=+3 score={mtf_score}")
+            else:
+                logs.append(f"mtf_score={mtf_score}")
+            if is_counter and extra_mtf.get("bias_confidence_mismatch"):
+                gap = int(extra_mtf.get("mtf_confidence_gap") or 0)
+                boost = min(6, max(2, gap // 5))
+                conf = min(100, conf + boost)
+                logs.append(f"bias_conf_mismatch_boost=+{boost} gap={gap}")
+            signal.scanner_metadata = {
+                **(signal.scanner_metadata or {}),
+                "mtf_score": mtf_score,
+                "mtf_patterns": extra_mtf.get("mtf_patterns"),
+            }
 
     trap = self._config.validator.get("trap_avoidance") or {}
-    if trap.get("enabled") and components.get("spot_vwap", 0) == 0:
+    if (
+        trap.get("enabled")
+        and components.get("spot_vwap", 0) == 0
+        and not is_counter
+    ):
         cap = int(trap.get("max_confidence_if_spot_vwap_against", 74))
         if conf > cap:
             logs.append(f"spot_vwap_against_cap={cap}")
@@ -287,6 +343,7 @@ class QualityGate:
       "mean_reversion",
       "liquidity_sweep",
       "reversal",
+      "peak_reversal_fade",
     ):
       conf = min(conf, 64)
       logs.append("neutral_bias_cap=64")

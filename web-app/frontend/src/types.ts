@@ -10,6 +10,8 @@ export interface MarketSummary {
   market_session: string;
   market_open: boolean;
   strategy: string;
+  regime?: string | null;
+  confidence?: number | null;
   trading_mode: string;
   ist_time?: string;
   today_pnl: number;
@@ -25,6 +27,8 @@ export interface MarketSummary {
   candidate_count?: number;
   rejection_count?: number;
   consecutive_losses?: number;
+  max_daily_loss?: number;
+  max_deployed_pct_of_equity?: number;
   kill_switch?: boolean;
   entries_blocked?: boolean;
   block_reason?: string | null;
@@ -67,12 +71,28 @@ export interface FlattradeSession {
   valid: boolean;
 }
 
+export interface FlattradeCredentialsStatus {
+  source: string;
+  user_id: string | null;
+  api_key_masked: string | null;
+  api_secret_set: boolean;
+  password_set: boolean;
+  totp_secret_set: boolean;
+  redirect_url: string;
+  has_api_credentials: boolean;
+  has_auto_login: boolean;
+}
+
 export interface EngineHealth {
   status: string;
   trading_mode: string;
   db_ok: boolean;
   broker_connected: boolean;
   flattrade_session: FlattradeSession | null;
+  flattrade_credentials?: {
+    configured: boolean;
+    has_auto_login: boolean;
+  };
   spot_ltp: string | null;
   instrument_count: number;
   last_quote_ts: string | null;
@@ -150,6 +170,11 @@ export interface WatchlistItem {
   ask: number | null;
   volume: number | null;
   oi: number | null;
+  segment_group?: string;
+  segment_label?: string;
+  segment_key?: string;
+  expiry_label?: string | null;
+  group_order?: number;
   iv?: number | null;
   delta?: number | null;
   gamma?: number | null;
@@ -163,8 +188,16 @@ export interface CommoditySnapshot {
   underlying: string;
   display_name?: string;
   spot_ltp: number | null;
+  /** Futures LTP for option-chain ATM when spot_ltp is NSE cash index. */
+  trading_spot_ltp?: number | null;
+  session_open?: number | null;
+  change?: number | null;
+  change_pct?: number | null;
   atm_strike: number | null;
   expiry_symbol?: string | null;
+  expiry_label?: string | null;
+  fut_tsym?: string | null;
+  card_type?: "tradeable" | "display" | "fut";
   instrument_count?: number;
   strike_band_points?: number;
   strike_step?: number;
@@ -176,6 +209,7 @@ export interface CommoditySnapshot {
 export interface Watchlist {
   underlying: string;
   active_underlying?: string;
+  watchlist_mode?: "futures" | "options";
   commodities?: CommoditySnapshot[];
   atm_strike_steps?: number;
   spot_ltp: number | null;
@@ -206,6 +240,8 @@ export interface WatchlistOpenPosition {
   unrealized_pnl?: number;
   premium_deployed?: number;
   setup_type?: string;
+  stop_loss?: number | null;
+  target_price?: number | null;
 }
 
 export interface ClosedBlotterTrade {
@@ -237,6 +273,25 @@ export interface DecisionLogEvent {
 export interface TradeBlotter {
   open_positions: WatchlistOpenPosition[];
   closed_trades: ClosedBlotterTrade[];
+  today_pnl?: number;
+}
+
+export interface OhlcBar {
+  ts: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume?: number | null;
+}
+
+export interface ChartCandlesResponse {
+  underlying: string;
+  interval: string;
+  price_source?: string;
+  instrument_token?: string | null;
+  fut_tsym?: string | null;
+  bars: OhlcBar[];
 }
 
 export interface AuthUser {

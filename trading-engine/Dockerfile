@@ -19,11 +19,11 @@ RUN mkdir -p /app/.flattrade
 
 EXPOSE 8001
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3)"
+HEALTHCHECK --interval=30s --timeout=12s --start-period=90s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=10)"
 
 COPY docker-entrypoint.sh /docker-entrypoint.sh
 RUN chmod +x /docker-entrypoint.sh
 
 ENTRYPOINT ["/docker-entrypoint.sh"]
-CMD ["python", "-m", "algoflat.main"]
+CMD ["python", "-m", "algomcx.main"]

@@ -4,6 +4,62 @@ from __future__ import annotations
 from decimal import Decimal
 
 from algomcx.models.events import Bias, CandidateSignal
+from algomcx.validator.counter_bias_greeks import (
+    COUNTER_BIAS_SETUPS,
+    counter_bias_greek_reasons,
+)
+
+
+def _counter_bias_trap_reasons(
+    signal: CandidateSignal,
+    trap_cfg: dict,
+    feat,
+    extra: dict,
+    spot,
+    vwap,
+) -> list[str]:
+    reasons: list[str] = []
+    cb = trap_cfg.get("counter_bias") or {}
+
+    if signal.side == "CE" and feat.bias_5m != Bias.BEARISH:
+        reasons.append("counter_ce_needs_bearish_trend")
+    if signal.side == "PE" and feat.bias_5m != Bias.BULLISH:
+        reasons.append("counter_pe_needs_bullish_trend")
+
+    min_ext = Decimal(str(cb.get("min_extension_points", 18)))
+    if extra.get("bias_confidence_mismatch"):
+        min_ext = Decimal(str(cb.get("mismatch_min_extension_points", 12)))
+
+    if spot is not None and vwap is not None:
+        if signal.side == "PE" and spot <= vwap + min_ext:
+            reasons.append("counter_pe_not_extended")
+        if signal.side == "CE" and spot >= vwap - min_ext:
+            reasons.append("counter_ce_not_extended")
+
+    min_cb_mtf = int(cb.get("min_counter_mtf_score", 48))
+    if extra.get("bias_confidence_mismatch"):
+        min_cb_mtf = int(cb.get("mismatch_min_counter_mtf_score", min_cb_mtf - 5))
+    key = "counter_mtf_score_pe" if signal.side == "PE" else "counter_mtf_score_ce"
+    raw = extra.get(key)
+    if raw is None or int(raw) < min_cb_mtf:
+        reasons.append("counter_mtf_too_low")
+
+    sigs = extra.get("counter_bias_signals") or []
+    min_sigs = int(cb.get("min_reversal_signals", 2))
+    if extra.get("bias_confidence_mismatch"):
+        min_sigs = int(cb.get("mismatch_min_reversal_signals", 1))
+    if len(sigs) < min_sigs:
+        reasons.append("counter_reversal_signals_weak")
+
+    if cb.get("require_1m_turn", True):
+        bias_1m = str(extra.get("bias_1m") or "")
+        if signal.side == "PE" and bias_1m == "bullish":
+            reasons.append("counter_1m_not_turning")
+        if signal.side == "CE" and bias_1m == "bearish":
+            reasons.append("counter_1m_not_turning")
+
+    reasons.extend(counter_bias_greek_reasons(signal, trap_cfg))
+    return reasons
 
 
 def trap_rejection_reasons(
@@ -13,8 +69,20 @@ def trap_rejection_reasons(
     if not trap_cfg.get("enabled", False):
         return []
 
-    reasons: list[str] = []
     setup = signal.setup_type
+    if setup in COUNTER_BIAS_SETUPS:
+        feat = signal.feature_snapshot
+        extra = feat.extra or {}
+        return _counter_bias_trap_reasons(
+            signal,
+            trap_cfg,
+            feat,
+            extra,
+            feat.nifty_spot,
+            feat.session_vwap,
+        )
+
+    reasons: list[str] = []
 
     blocked = set(trap_cfg.get("blocked_setups") or [])
     if setup in blocked:
@@ -77,10 +145,10 @@ def trap_rejection_reasons(
     if trap_cfg.get("require_mtf_alignment", True):
         min_mtf = int(trap_cfg.get("min_mtf_score", 55))
         if signal.side == "CE":
-            mtf = int(extra.get("mtf_score_ce") or 0)
+            mtf_raw = extra.get("mtf_score_ce")
         else:
-            mtf = int(extra.get("mtf_score_pe") or 0)
-        if mtf < min_mtf:
+            mtf_raw = extra.get("mtf_score_pe")
+        if mtf_raw is not None and int(mtf_raw) < min_mtf:
             reasons.append("mtf_score_too_low")
 
     ema_setups = set(trap_cfg.get("require_ema_alignment_for") or [])
@@ -93,5 +161,23 @@ def trap_rejection_reasons(
                 reasons.append("ema_structure_not_bull")
             if signal.side == "PE" and not (e9d < e21d and spot <= e21d):
                 reasons.append("ema_structure_not_bear")
+
+    # Breakout setups (ORB, gap, PDH/PDL) — require actual OR/range break (same as setup detector).
+    strict_breakouts = set(trap_cfg.get("strict_breakout_setups") or [])
+    if setup in strict_breakouts:
+        min_brk_mtf = int(trap_cfg.get("min_mtf_score_breakout", 62))
+        if signal.side == "CE":
+            mtf_raw = extra.get("mtf_score_ce")
+        else:
+            mtf_raw = extra.get("mtf_score_pe")
+        if mtf_raw is not None and int(mtf_raw) < min_brk_mtf:
+            reasons.append("breakout_mtf_too_low")
+        or_h, or_l = extra.get("or_high"), extra.get("or_low")
+        if spot is not None and signal.side == "CE" and or_h is not None:
+            if spot <= Decimal(str(or_h)):
+                reasons.append("orb_break_too_weak")
+        if spot is not None and signal.side == "PE" and or_l is not None:
+            if spot >= Decimal(str(or_l)):
+                reasons.append("orb_break_too_weak")
 
     return reasons

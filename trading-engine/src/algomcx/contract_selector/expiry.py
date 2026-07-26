@@ -7,14 +7,12 @@ from zoneinfo import ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 _OPTION_TSYM = re.compile(r"^(?P<ul>[A-Z0-9]+)(?P<tag>\d{2}[A-Z]{3}\d{2})[CP]\d+")
 
-# NIFTY / BankNifty weekly options currently expire on Tuesday.
-# Sensex/BSE weekly remain Thursday — override via caller if needed.
+# NIFTY weekly options expire on Tuesday.
 _DEFAULT_WEEKLY_WEEKDAY = {
-  "NIFTY": 1,       # Tuesday
+  "GOLD": 1,        # Tuesday (MCX weekly series; refined after backtest)
   "BANKNIFTY": 1,   # Tuesday
   "FINNIFTY": 1,    # Tuesday
   "MIDCPNIFTY": 1,  # Tuesday
-  "SENSEX": 3,      # Thursday
 }
 
 
@@ -66,23 +64,14 @@ def next_weekly_expiry_dates(
   return dates
 
 
-def include_expiry_day(
-  as_of: date | None = None,
-  now: datetime | None = None,
-  *,
-  market_close: time = time(15, 30),
-) -> bool:
-  """Keep today's expiry only while the session is still live."""
+def include_expiry_day(as_of: date | None = None, now: datetime | None = None) -> bool:
+  """Keep today's expiry only while the cash session is still live."""
   now_ist = (now or datetime.now(IST)).astimezone(IST)
   day = as_of or now_ist.date()
   if now_ist.date() != day:
     return True
-  return now_ist.time() < market_close
-
-
-_ALLOWED_OPTION_INST = frozenset(
-  {"OPTIDX", "OPTFUT", "OPTCOM", "OPTSTK", "OPTCUR", "OPTFUTCOM"}
-)
+  # After 15:30 IST, contracts for today's weekly are done — roll next.
+  return now_ist.time() < time(15, 30)
 
 
 def collect_expiry_tags_from_search(
@@ -91,11 +80,10 @@ def collect_expiry_tags_from_search(
   underlying: str,
   as_of: date | None = None,
   include_today: bool | None = None,
-  market_close: time = time(15, 30),
 ) -> dict[str, date]:
   today = as_of or datetime.now(IST).date()
   if include_today is None:
-    include_today = include_expiry_day(as_of=today, market_close=market_close)
+    include_today = include_expiry_day(as_of=today)
 
   expiries: dict[str, date] = {}
   ul = underlying.upper()
@@ -104,13 +92,14 @@ def collect_expiry_tags_from_search(
     tsym = str(row.get("tsym", ""))
     if "NXT" in tsym:
       continue
-    instname = str(row.get("instname", "")).upper()
-    if instname and instname not in _ALLOWED_OPTION_INST:
+    instname = row.get("instname")
+    if instname and instname != "OPTIDX":
       continue
     match = _OPTION_TSYM.match(tsym)
-    if not match or match.group("ul") != ul:
+    if match and match.group("ul") == ul:
+      tag = match.group("tag").upper()
+    else:
       continue
-    tag = match.group("tag").upper()
     exp = parse_expiry_tag(tag)
     if exp is None:
       continue
@@ -128,14 +117,9 @@ def nearest_weekly_expiry_tag(
   underlying: str,
   as_of: date | None = None,
   include_today: bool | None = None,
-  market_close: time = time(15, 30),
 ) -> str | None:
   expiries = collect_expiry_tags_from_search(
-    rows,
-    underlying=underlying,
-    as_of=as_of,
-    include_today=include_today,
-    market_close=market_close,
+    rows, underlying=underlying, as_of=as_of, include_today=include_today
   )
   if expiries:
     return min(expiries.items(), key=lambda item: item[1])[0]
@@ -160,19 +144,14 @@ def weekly_expiry_candidates(
   as_of: date | None = None,
   include_today: bool | None = None,
   limit: int = 4,
-  market_close: time = time(15, 30),
 ) -> list[str]:
-  """Ordered list of expiry tags to try (search first, then calendar)."""
+  """Ordered list of weekly expiry tags to try (search first, then calendar)."""
   today = as_of or datetime.now(IST).date()
   if include_today is None:
-    include_today = include_expiry_day(as_of=today, market_close=market_close)
+    include_today = include_expiry_day(as_of=today)
 
   expiries = collect_expiry_tags_from_search(
-    rows,
-    underlying=underlying,
-    as_of=today,
-    include_today=include_today,
-    market_close=market_close,
+    rows, underlying=underlying, as_of=today, include_today=include_today
   )
   tags = [t for t, _ in sorted(expiries.items(), key=lambda item: item[1])]
 
@@ -190,4 +169,5 @@ def weekly_expiry_candidates(
 
 
 def chain_anchor_symbol(underlying: str, expiry_tag: str, atm_strike: int, side: str = "CE") -> str:
-  return f"{underlying.upper()}{expiry_tag.upper()}{side[0]}{int(atm_strike)}"
+  ul = underlying.upper()
+  return f"{ul}{expiry_tag.upper()}{side[0]}{int(atm_strike)}"

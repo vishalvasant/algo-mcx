@@ -8,6 +8,8 @@ import structlog
 
 from algomcx.config import AppConfig
 from algomcx.models.events import CandidateSignal, OptionState, ValidationResult
+from algomcx.validator.expiry_cautious import expiry_cautious_rejection_reasons
+from algomcx.validator.time_of_day_cautious import time_of_day_cautious_rejection_reasons
 from algomcx.validator.trap_avoidance import trap_rejection_reasons
 
 logger = structlog.get_logger(__name__)
@@ -32,18 +34,43 @@ class RuleValidator:
     now: datetime | None = None,
   ) -> ValidationResult:
     reasons: list[str] = []
-    clock = now.astimezone(IST).time() if now is not None else datetime.now(IST).time()
+    ist_now = now.astimezone(IST) if now is not None else datetime.now(IST)
+    clock = ist_now.time()
 
     start = time.fromisoformat(self._validator["entry_start_time"])
     end = time.fromisoformat(self._validator["entry_end_time"])
     if not (start <= clock <= end):
       reasons.append("outside_entry_window")
+    else:
+      tod = self._validator.get("time_of_day_cautious") or {}
+      if tod.get("enabled", False):
+        reasons.extend(
+          time_of_day_cautious_rejection_reasons(signal, tod, now=ist_now)
+        )
 
     if kill_switch:
       reasons.append("kill_switch_active")
 
     if is_expiry_day and bool(self._validator.get("expiry_day_block_entries", False)):
       reasons.append("expiry_day_block")
+    elif is_expiry_day:
+      cautious = self._validator.get("expiry_day_cautious") or {}
+      if cautious.get("enabled", False):
+        reasons.extend(expiry_cautious_rejection_reasons(signal, cautious))
+        if bool(cautious.get("apply_trap_avoidance", False)):
+          trap_cfg = dict(self._validator.get("trap_avoidance") or {})
+          buffer = cautious.get("spot_vwap_buffer_points")
+          if buffer is not None:
+            trap_cfg["spot_vwap_buffer_points"] = buffer
+          reasons.extend(trap_rejection_reasons(signal, trap_cfg))
+      else:
+        reasons.extend(
+          trap_rejection_reasons(signal, self._validator.get("trap_avoidance") or {})
+        )
+    else:
+      reasons.extend(
+        trap_rejection_reasons(signal, self._validator.get("trap_avoidance") or {})
+      )
 
     if has_open_for_token:
       reasons.append("position_already_open_for_symbol")
@@ -76,10 +103,6 @@ class RuleValidator:
           reasons.append("low_volume")
         if option.oi is not None and option.oi < min_oi:
           reasons.append("low_oi")
-
-    reasons.extend(
-      trap_rejection_reasons(signal, self._validator.get("trap_avoidance") or {})
-    )
 
     passed = len(reasons) == 0
     result = ValidationResult(

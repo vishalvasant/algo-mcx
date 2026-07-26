@@ -8,29 +8,47 @@ function formatPrice(n: number | null | undefined) {
 interface MarketTickerProps {
   summary: MarketSummary | null;
   spotLtp?: string | null;
-  underlyingLabel?: string;
 }
 
-export function MarketTicker({ summary, spotLtp, underlyingLabel = "MCX" }: MarketTickerProps) {
-  const spot = summary?.spot_ltp ?? (spotLtp ? Number(spotLtp) : null);
-  const items = [
-    { label: underlyingLabel.toUpperCase(), value: formatPrice(spot), accent: true },
+interface TickerItem {
+  label: string;
+  value: string;
+  accent?: boolean;
+  pnl?: number | null;
+}
+
+export function MarketTicker({ summary, spotLtp }: MarketTickerProps) {
+  const commodities = summary?.commodities ?? [];
+  const items: TickerItem[] =
+    commodities.length > 0
+      ? commodities.map((c) => ({
+          label: c.display_name ?? c.underlying,
+          value:
+            c.spot_ltp != null
+              ? c.spot_ltp.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+              : "—",
+          accent: c.underlying === (summary?.active_underlying ?? summary?.underlying),
+        }))
+      : [
+          {
+            label: "GOLD",
+            value: formatPrice(summary?.spot_ltp ?? (spotLtp ? Number(spotLtp) : null)),
+            accent: true,
+          },
+        ];
+
+  const tapeExtras: TickerItem[] = [
     { label: "VWAP", value: formatPrice(summary?.session_vwap ?? null) },
-    { label: "vs VWAP", value: summary?.spot_vs_vwap ?? "—" },
-    { label: "ATM", value: summary?.atm_strike?.toLocaleString("en-IN") ?? "—" },
-    { label: "5m Bias", value: summary?.bias_5m ?? "NEUTRAL" },
-    { label: "Strategy", value: (summary?.strategy ?? "vwap_reclaim").replace(/_/g, " ").toUpperCase() },
-    { label: "Session", value: summary?.market_session ?? "—" },
+    { label: "Bias", value: summary?.bias_5m ?? "NEUTRAL" },
     {
       label: "Today P&L",
       value: summary?.today_pnl != null ? `₹${summary.today_pnl.toFixed(2)}` : "—",
       pnl: summary?.today_pnl,
     },
-    { label: "Trades", value: String(summary?.trade_count ?? 0) },
-    { label: "Mode", value: (summary?.trading_mode ?? "paper").toUpperCase() },
+    { label: "Session", value: summary?.market_session ?? "—" },
   ];
 
-  const tape = [...items, ...items];
+  const tape: TickerItem[] = [...items, ...tapeExtras, ...items, ...tapeExtras];
 
   return (
     <div className="market-ticker" aria-label="Live market tape">

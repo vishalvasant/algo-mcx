@@ -45,6 +45,8 @@ def detect_all_setups(
     "mean_reversion": _mean_reversion(spot, vwap),
     "liquidity_sweep": _liquidity_sweep(m1, ind),
     "expiry_scalping": _expiry_scalp(m1, bias, is_expiry, ind),
+    # peak_reversal_fade is computed in FeatureEngine (5m/15m counter-bias).
+    "peak_reversal_fade": None,
   }
 
 

@@ -52,12 +52,11 @@ class RestQuotePoller:
 
   async def poll_universe(self, universe: ContractUniverse | None) -> int:
     updated = 0
-    if self._spot_token:
-      spot_raw = await self._broker.get_quotes(self._spot_exchange, self._spot_token)
-      spot_quote = quote_from_rest(self._spot_exchange, self._spot_token, spot_raw)
-      if spot_quote:
-        await self._market_data.on_quote(spot_quote)
-        updated += 1
+    spot_raw = await self._broker.get_quotes(self._spot_exchange, self._spot_token)
+    spot_quote = quote_from_rest(self._spot_exchange, self._spot_token, spot_raw)
+    if spot_quote:
+      await self._market_data.on_quote(spot_quote)
+      updated += 1
 
     if universe is None:
       return updated

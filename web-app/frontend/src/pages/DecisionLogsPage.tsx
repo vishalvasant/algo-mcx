@@ -1,166 +1,225 @@
-import { useCallback, useEffect, useState } from "react";
-import { Filter, RefreshCw, ScrollText } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Filter,
+  RefreshCw,
+  ScrollText,
+} from "lucide-react";
 import { fetchDecisionLogs } from "../api/client";
 import type { DecisionLogEvent } from "../types";
-import { StatusBadge } from "../components/StatusBadge";
+import { AppPageShell } from "../components/AppPageShell";
+import { formatHumanDecision } from "../utils/decisionLogFormat";
+
+const PAGE_SIZE = 25;
+
+const FILTERS = [
+  { id: "all", label: "All" },
+  { id: "strategy_decision", label: "Decisions" },
+  { id: "entry_skipped", label: "Skipped" },
+  { id: "manual_sync", label: "Sync" },
+] as const;
 
 function formatTs(ts: string) {
   try {
-    return new Date(ts).toLocaleString("en-IN", {
+    const d = new Date(ts);
+    const date = d.toLocaleDateString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      day: "2-digit",
+      month: "short",
+    });
+    const time = d.toLocaleTimeString("en-IN", {
       timeZone: "Asia/Kolkata",
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
-      day: "2-digit",
-      month: "short",
     });
+    return `${date} · ${time}`;
   } catch {
     return ts;
   }
 }
 
-function metaText(ev: DecisionLogEvent): string {
-  const m = ev.metadata || {};
-  if (ev.event_type === "strategy_decision") {
-    const strat = String(m.selected_strategy ?? "—");
-    const conf = m.confidence != null ? `conf ${m.confidence}` : "";
-    const regime =
-      m.regime && typeof m.regime === "object"
-        ? `regime ${(m.regime as { primary?: string }).primary ?? "—"}`
-        : "";
-    const side = m.position_side ? `side ${m.position_side}` : "";
-    const reason = ev.message && !ev.message.startsWith("selected")
-      ? ev.message.slice(0, 120)
-      : "";
-    return [strat, conf, regime, side, reason].filter(Boolean).join(" · ");
-  }
-  if (ev.event_type === "entry_skipped") {
-    return `${m.setup ?? ""} ${m.side ?? ""} ${m.tsym ?? ""} · ${m.block_reason ?? "blocked"}`;
-  }
-  if (ev.event_type === "manual_sync") {
-    const u = m.universe as { action?: string; after?: number } | undefined;
-    return `universe ${u?.action ?? "—"} (${u?.after ?? "?"} ctr)`;
-  }
-  return ev.message;
+function feedSeverityClass(ev: DecisionLogEvent): string {
+  if (ev.event_type === "entry_skipped") return "sev-warning";
+  if (ev.metadata?.trade_allowed === true) return "sev-success";
+  if (ev.severity === "critical") return "sev-critical";
+  if (ev.severity === "warning") return "sev-warning";
+  if (ev.severity === "success") return "sev-success";
+  return "";
 }
 
 export function DecisionLogsPage() {
   const [events, setEvents] = useState<DecisionLogEvent[]>([]);
   const [intervalSec, setIntervalSec] = useState(10);
   const [todayCount, setTodayCount] = useState(0);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [filter, setFilter] = useState<string>("all");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const offset = (page - 1) * PAGE_SIZE;
+
+  const rangeLabel = useMemo(() => {
+    if (total === 0) return "0 records";
+    const from = offset + 1;
+    const to = Math.min(offset + events.length, total);
+    return `${from}–${to} of ${total}`;
+  }, [events.length, offset, total]);
+
   const load = useCallback(() => {
     setBusy(true);
     const type = filter === "all" ? undefined : filter;
-    fetchDecisionLogs(150, type)
+    fetchDecisionLogs({ limit: PAGE_SIZE, offset, eventType: type })
       .then((res) => {
         setEvents(res.events);
         setIntervalSec(res.scan_interval_seconds);
         setTodayCount(res.decisions_today);
+        setTotal(res.total);
         setError(null);
       })
       .catch((e) => setError(String(e)))
       .finally(() => setBusy(false));
-  }, [filter]);
+  }, [filter, offset]);
 
   useEffect(() => {
     load();
-    const id = setInterval(load, 5000);
-    return () => clearInterval(id);
   }, [load]);
 
+  const goPrev = () => setPage((p) => Math.max(1, p - 1));
+  const goNext = () => setPage((p) => Math.min(totalPages, p + 1));
+
+  const setFilterAndReset = (id: string) => {
+    setFilter(id);
+    setPage(1);
+  };
+
   return (
-    <div className="logs-page">
-      <div className="card panel logs-hero">
-        <div className="panel-head">
-          <h3>
-            <ScrollText size={16} />
-            Decision Logs
-          </h3>
-          <button className="btn btn-ghost btn-sm" onClick={load} disabled={busy}>
-            <RefreshCw size={14} />
-            {busy ? "Loading…" : "Refresh"}
-          </button>
-        </div>
-        <p className="panel-copy">
-          While the market session is open, the engine scans for entries every{" "}
-          <strong>{intervalSec}s</strong>. Each scan writes a decision here (NO_TRADE or
-          selected strategy + confidence). Entry skips and manual syncs are included.
-        </p>
-        <div className="metric-grid logs-metrics">
-          <div className="metric">
-            <span>Scan interval</span>
-            <strong>{intervalSec}s</strong>
-          </div>
-          <div className="metric">
-            <span>Decisions today</span>
-            <strong>{todayCount}</strong>
-          </div>
-          <div className="metric">
-            <span>Showing</span>
-            <strong>{events.length}</strong>
-          </div>
-        </div>
-        <div className="logs-filter">
-          <Filter size={14} />
-          <select value={filter} onChange={(e) => setFilter(e.target.value)}>
-            <option value="all">All events</option>
-            <option value="strategy_decision">Strategy decisions</option>
-            <option value="entry_skipped">Entry skipped</option>
-            <option value="manual_sync">Manual sync</option>
-          </select>
-        </div>
-      </div>
+    <AppPageShell
+      title="Decision Logs"
+      icon={ScrollText}
+      description="Human-readable audit of every scan, entry skip, and sync while the engine is running."
+    >
+      <div className="logs-page-full">
+        <section className="cockpit-panel logs-stats-panel">
+          <header className="cockpit-panel-head logs-stats-head">
+            <Filter size={14} strokeWidth={2} />
+            <h3>Overview</h3>
+            <button
+              className="btn btn-ghost btn-sm logs-refresh-btn"
+              onClick={load}
+              disabled={busy}
+              type="button"
+            >
+              <RefreshCw size={13} />
+              {busy ? "Loading…" : "Refresh"}
+            </button>
+          </header>
 
-      {error && <div className="error-banner">{error}</div>}
-
-      <div className="card panel">
-        {events.length === 0 ? (
-          <p className="panel-copy muted">
-            No logs yet. They appear once the market is open and the scanner runs (every{" "}
-            {intervalSec}s), or after you run a manual Flattrade sync.
-          </p>
-        ) : (
-          <div className="watchlist-scroll logs-table-wrap">
-            <table className="watchlist-table pro blotter-table">
-              <thead>
-                <tr>
-                  <th>Time (IST)</th>
-                  <th>Type</th>
-                  <th>Summary</th>
-                  <th>Detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                {events.map((ev) => (
-                  <tr key={ev.id}>
-                    <td className="muted ts">{formatTs(ev.ts)}</td>
-                    <td>
-                      <StatusBadge
-                        severity={
-                          ev.event_type === "entry_skipped"
-                            ? "warning"
-                            : ev.metadata?.trade_allowed
-                              ? "success"
-                              : "neutral"
-                        }
-                        label={ev.event_type.replace(/_/g, " ").toUpperCase()}
-                      />
-                    </td>
-                    <td className="mono">{metaText(ev)}</td>
-                    <td className="muted logs-detail" title={ev.message}>
-                      {ev.message}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="cockpit-command-metrics logs-command-metrics">
+            <div className="cmd-metric">
+              <span>Scan interval</span>
+              <strong>{intervalSec}s</strong>
+            </div>
+            <div className="cmd-metric">
+              <span>Decisions today</span>
+              <strong>{todayCount}</strong>
+            </div>
+            <div className="cmd-metric">
+              <span>Matching filter</span>
+              <strong>{total}</strong>
+            </div>
+            <div className="cmd-metric">
+              <span>Page</span>
+              <strong>
+                {page} / {totalPages}
+              </strong>
+            </div>
           </div>
-        )}
+
+          <div className="logs-filter-row">
+            <span className="logs-filter-label">Filter</span>
+            <div className="chart-interval-tabs logs-filter-tabs" role="tablist" aria-label="Log type">
+              {FILTERS.map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={filter === f.id}
+                  className={`chart-interval ${filter === f.id ? "active" : ""}`}
+                  onClick={() => setFilterAndReset(f.id)}
+                  disabled={busy}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {error ? <div className="error-banner">{error}</div> : null}
+
+        <section className="cockpit-panel logs-feed-panel decision-feed-panel">
+          <header className="cockpit-panel-head">
+            <ScrollText size={14} strokeWidth={2} />
+            <h3>Event stream</h3>
+            <span className="logs-range-pill mono muted">{rangeLabel}</span>
+          </header>
+
+          {events.length === 0 ? (
+            <p className="blotter-empty decision-log-empty">
+              {busy
+                ? "Loading events…"
+                : "No logs yet. They appear once the market is open and the scanner runs."}
+            </p>
+          ) : (
+            <ul className="decision-feed-list decision-feed-list--page">
+              {events.map((ev) => {
+                const human = formatHumanDecision(ev);
+                return (
+                  <li
+                    key={ev.id}
+                    className={`decision-feed-item ${feedSeverityClass(ev)}`.trim()}
+                  >
+                    <span className="decision-feed-time mono">{formatTs(ev.ts)}</span>
+                    <strong className="decision-feed-title">{human.title}</strong>
+                    <span className="decision-feed-msg">{human.summary}</span>
+                    {human.detail ? (
+                      <span className="decision-feed-detail muted">{human.detail}</span>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          <nav className="logs-pagination logs-pagination--inline" aria-label="Decision log pages">
+            <span className="logs-pagination-range muted">{rangeLabel}</span>
+            <div className="logs-pagination-actions">
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={goPrev}
+                disabled={busy || page <= 1}
+              >
+                <ChevronLeft size={14} />
+                Prev
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={goNext}
+                disabled={busy || page >= totalPages}
+              >
+                Next
+                <ChevronRight size={14} />
+              </button>
+            </div>
+          </nav>
+        </section>
       </div>
-    </div>
+    </AppPageShell>
   );
 }

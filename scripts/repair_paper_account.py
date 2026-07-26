@@ -38,7 +38,7 @@ _CANDIDATES = [
     _SCRIPT.parent / "src",
 ]
 for _src in _CANDIDATES:
-    if (_src / "algoflat").is_dir():
+    if (_src / "algomcx").is_dir():
         sys.path.insert(0, str(_src))
         break
 

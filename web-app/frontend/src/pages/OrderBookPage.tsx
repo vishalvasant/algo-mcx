@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { BookOpen, Download, FileText, Filter } from "lucide-react";
+import { BookOpen, CalendarRange, Download, FileText, RefreshCw } from "lucide-react";
 import { fetchTradeDates, fetchTradesReport } from "../api/client";
 import type { Trade, TradesReport } from "../types";
+import { AppPageShell } from "../components/AppPageShell";
 
 function todayIst(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
@@ -213,9 +214,19 @@ function buildMarkdownReport(report: TradesReport): string {
   return lines.join("\n");
 }
 
+const DATE_PRESETS = [
+  { id: "yesterday", label: "Yesterday" },
+  { id: "today", label: "Today" },
+  { id: "week", label: "7 days" },
+  { id: "all", label: "All" },
+] as const;
+
+type DatePreset = (typeof DATE_PRESETS)[number]["id"];
+
 export function OrderBookPage() {
   const [fromDate, setFromDate] = useState(yesterdayIst);
   const [toDate, setToDate] = useState(yesterdayIst);
+  const [activePreset, setActivePreset] = useState<DatePreset | "custom">("yesterday");
   const [availableDates, setAvailableDates] = useState<string[]>([]);
   const [report, setReport] = useState<TradesReport | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -264,7 +275,8 @@ export function OrderBookPage() {
     return "All dates";
   }, [fromDate, toDate]);
 
-  const setPreset = (preset: "yesterday" | "today" | "all" | "week") => {
+  const setPreset = (preset: DatePreset) => {
+    setActivePreset(preset);
     const t = todayIst();
     if (preset === "today") {
       setFromDate(t);
@@ -282,7 +294,6 @@ export function OrderBookPage() {
         setToDate("");
       }
     } else {
-      // last 7 calendar days ending today
       const end = new Date(
         new Date().toLocaleString("en-US", { timeZone: "Asia/Kolkata" }),
       );
@@ -325,238 +336,257 @@ export function OrderBookPage() {
   };
 
   return (
-    <>
-      <div className="page-header">
-        <h2>Order Book</h2>
-        <p>
-          Historical closed trades · filter by IST date · export CSV / JSON /
-          full P&amp;L report
-        </p>
-      </div>
-
-      {error && <div className="error-banner">{error}</div>}
-
-      <div className="card orderbook-filters">
-        <div className="orderbook-filter-row">
-          <label>
-            <span>From</span>
-            <input
-              type="date"
-              value={fromDate}
-              onChange={(e) => setFromDate(e.target.value)}
-              list="trade-dates"
-            />
-          </label>
-          <label>
-            <span>To</span>
-            <input
-              type="date"
-              value={toDate}
-              onChange={(e) => setToDate(e.target.value)}
-              list="trade-dates"
-            />
-          </label>
-          <datalist id="trade-dates">
-            {availableDates.map((d) => (
-              <option key={d} value={d} />
-            ))}
-          </datalist>
-          <div className="orderbook-presets">
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPreset("yesterday")}>
-              Yesterday
-            </button>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPreset("today")}>
-              Today
-            </button>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPreset("week")}>
-              7 days
-            </button>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPreset("all")}>
-              All
-            </button>
-          </div>
-          <button type="button" className="btn btn-primary btn-sm" onClick={load} disabled={loading}>
-            <Filter size={14} />
-            {loading ? "Loading…" : "Apply"}
-          </button>
-        </div>
-        <div className="orderbook-export-row">
-          <span className="muted">Range: {rangeLabel}</span>
-          <div className="orderbook-export-btns">
+    <AppPageShell
+      title="Order Book"
+      icon={BookOpen}
+      description="Historical closed trades · filter by IST date · export CSV / JSON / full P&L report"
+    >
+      <div className="logs-page-full orderbook-page">
+        <section className="cockpit-panel logs-stats-panel orderbook-toolbar">
+          <header className="cockpit-panel-head logs-stats-head">
+            <CalendarRange size={14} strokeWidth={2} />
+            <h3>Date range</h3>
             <button
               type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={exportCsv}
-              disabled={!trades.length}
+              className="btn btn-ghost btn-sm logs-refresh-btn"
+              onClick={load}
+              disabled={loading}
             >
-              <Download size={14} />
-              CSV
+              <RefreshCw size={13} />
+              {loading ? "Loading…" : "Refresh"}
             </button>
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={exportJson}
-              disabled={!report}
-            >
-              <Download size={14} />
-              JSON
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm"
-              onClick={exportMarkdown}
-              disabled={!report}
-            >
-              <FileText size={14} />
-              P&amp;L report
-            </button>
-          </div>
-        </div>
-      </div>
+          </header>
 
-      {summary && (
-        <div className="pnl-stats-grid">
-          <div className="card pnl-stat">
-            <span className="pnl-stat-label">Period P&amp;L</span>
-            <span className={`pnl-stat-value ${pnlClass(summary.total_pnl)}`}>
-              {formatInr(summary.total_pnl)}
-            </span>
-          </div>
-          <div className="card pnl-stat">
-            <span className="pnl-stat-label">Trades</span>
-            <span className="pnl-stat-value">
-              {summary.trades}{" "}
-              <span className="muted" style={{ fontSize: "0.85rem", fontWeight: 500 }}>
-                ({summary.wins}W / {summary.losses}L)
-              </span>
-            </span>
-          </div>
-          <div className="card pnl-stat">
-            <span className="pnl-stat-label">Win rate</span>
-            <span className="pnl-stat-value">
-              {summary.trades ? `${summary.win_rate_pct.toFixed(0)}%` : "—"}
-            </span>
-          </div>
-          <div className="card pnl-stat">
-            <span className="pnl-stat-label">Best / Worst</span>
-            <span className="pnl-stat-value" style={{ fontSize: "1rem" }}>
-              <span className={pnlClass(summary.best_trade)}>
-                {formatInr(summary.best_trade)}
-              </span>
-              {" / "}
-              <span className={pnlClass(summary.worst_trade)}>
-                {formatInr(summary.worst_trade)}
-              </span>
-            </span>
-          </div>
-          <div className="card pnl-stat">
-            <span className="pnl-stat-label">Avg trade</span>
-            <span className={`pnl-stat-value ${pnlClass(summary.avg_pnl)}`}>
-              {formatInr(summary.avg_pnl)}
-            </span>
-          </div>
-        </div>
-      )}
-
-      {report && Object.keys(report.by_day).length > 0 && (
-        <div className="card" style={{ marginBottom: "1rem", overflowX: "auto" }}>
-          <div className="panel-head" style={{ marginBottom: "0.75rem" }}>
-            <h3>Day breakdown</h3>
-          </div>
-          <table className="trades-table">
-            <thead>
-              <tr>
-                <th>Date (IST)</th>
-                <th className="num">Trades</th>
-                <th className="num">P&amp;L</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(report.by_day).map(([day, row]) => (
-                <tr key={day}>
-                  <td>{day}</td>
-                  <td className="num">{row.count}</td>
-                  <td className={`num mono ${pnlClass(Number(row.pnl))}`}>
-                    {formatInr(Number(row.pnl))}
-                  </td>
-                </tr>
+          <div className="orderbook-date-row">
+            <label className="orderbook-date-field">
+              <span>From</span>
+              <input
+                type="date"
+                value={fromDate}
+                onChange={(e) => {
+                  setFromDate(e.target.value);
+                  setActivePreset("custom");
+                }}
+                list="trade-dates"
+              />
+            </label>
+            <label className="orderbook-date-field">
+              <span>To</span>
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => {
+                  setToDate(e.target.value);
+                  setActivePreset("custom");
+                }}
+                list="trade-dates"
+              />
+            </label>
+            <datalist id="trade-dates">
+              {availableDates.map((d) => (
+                <option key={d} value={d} />
               ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <div className="card" style={{ overflowX: "auto" }}>
-        <div className="panel-head" style={{ marginBottom: "0.75rem" }}>
-          <h3>Closed trades</h3>
-          <span className="muted">{trades.length} closed</span>
-        </div>
-        {trades.length === 0 ? (
-          <div className="empty-state">
-            <BookOpen size={32} strokeWidth={1.5} />
-            <p>No closed trades in this date range</p>
+            </datalist>
           </div>
-        ) : (
-          <table className="trades-table">
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Date</th>
-                <th>Entry</th>
-                <th>Exit</th>
-                <th>Hold</th>
-                <th>Contract</th>
-                <th>Side</th>
-                <th>Setup</th>
-                <th className="num">Lots</th>
-                <th className="num">Entry ₹</th>
-                <th className="num">Exit ₹</th>
-                <th className="num">P&amp;L</th>
-                <th>Exit reason</th>
-              </tr>
-            </thead>
-            <tbody>
-              {trades.map((t, i) => {
-                const pnl = Number(t.pnl);
-                return (
-                  <tr key={t.id}>
-                    <td className="muted">{trades.length - i}</td>
-                    <td>{formatDate(t.exit_ts)}</td>
-                    <td>{formatTs(t.entry_ts)}</td>
-                    <td>{formatTs(t.exit_ts)}</td>
-                    <td>{holdLabel(t.hold_seconds)}</td>
-                    <td className="mono">{t.tsym ?? "—"}</td>
-                    <td>{t.side ?? "—"}</td>
-                    <td>{t.setup_type}</td>
-                    <td className="num">
-                      {t.lots ?? "—"}
-                      {t.lot_size ? ` × ${t.lot_size}` : ""}
-                    </td>
-                    <td className="num mono">{formatPrice(t.entry_price)}</td>
-                    <td className="num mono">{formatPrice(t.exit_price)}</td>
-                    <td className={`num mono ${pnlClass(pnl)}`}>{formatInr(pnl)}</td>
-                    <td>{t.exit_reason}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-            <tfoot>
-              <tr>
-                <td colSpan={11} style={{ textAlign: "right", fontWeight: 600 }}>
-                  Period realized P&amp;L
-                </td>
-                <td
-                  className={`num mono ${pnlClass(summary?.total_pnl ?? 0)}`}
-                  style={{ fontWeight: 700 }}
+
+          <div className="logs-filter-row">
+            <span className="logs-filter-label">Preset</span>
+            <div className="chart-interval-tabs logs-filter-tabs" role="tablist" aria-label="Date presets">
+              {DATE_PRESETS.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={activePreset === p.id}
+                  className={`chart-interval ${activePreset === p.id ? "active" : ""}`}
+                  onClick={() => setPreset(p.id)}
+                  disabled={loading}
                 >
-                  {formatInr(summary?.total_pnl ?? 0)}
-                </td>
-                <td />
-              </tr>
-            </tfoot>
-          </table>
-        )}
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="orderbook-export-row">
+            <span className="logs-range-pill mono muted">{rangeLabel}</span>
+            <div className="orderbook-export-btns">
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={exportCsv}
+                disabled={!trades.length}
+              >
+                <Download size={13} />
+                CSV
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={exportJson}
+                disabled={!report}
+              >
+                <Download size={13} />
+                JSON
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={exportMarkdown}
+                disabled={!report}
+              >
+                <FileText size={13} />
+                Report
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {error ? <div className="error-banner">{error}</div> : null}
+
+        {summary ? (
+          <section className="cockpit-panel logs-stats-panel">
+            <header className="cockpit-panel-head">
+              <BookOpen size={14} strokeWidth={2} />
+              <h3>Period summary</h3>
+            </header>
+            <div className="cockpit-command-metrics logs-command-metrics orderbook-metrics">
+              <div className="cmd-metric">
+                <span>Period P&amp;L</span>
+                <strong className={pnlClass(summary.total_pnl)}>{formatInr(summary.total_pnl)}</strong>
+              </div>
+              <div className="cmd-metric">
+                <span>Trades</span>
+                <strong>
+                  {summary.trades}{" "}
+                  <span className="muted orderbook-metric-sub">
+                    ({summary.wins}W / {summary.losses}L)
+                  </span>
+                </strong>
+              </div>
+              <div className="cmd-metric">
+                <span>Win rate</span>
+                <strong>{summary.trades ? `${summary.win_rate_pct.toFixed(0)}%` : "—"}</strong>
+              </div>
+              <div className="cmd-metric">
+                <span>Avg trade</span>
+                <strong className={pnlClass(summary.avg_pnl)}>{formatInr(summary.avg_pnl)}</strong>
+              </div>
+              <div className="cmd-metric">
+                <span>Best / Worst</span>
+                <strong className="orderbook-best-worst">
+                  <span className={pnlClass(summary.best_trade)}>{formatInr(summary.best_trade)}</span>
+                  <span className="muted"> / </span>
+                  <span className={pnlClass(summary.worst_trade)}>{formatInr(summary.worst_trade)}</span>
+                </strong>
+              </div>
+            </div>
+          </section>
+        ) : null}
+
+        {report && Object.keys(report.by_day).length > 0 ? (
+          <section className="cockpit-panel orderbook-table-panel">
+            <header className="cockpit-panel-head">
+              <h3>Day breakdown</h3>
+            </header>
+            <div className="cockpit-table-scroll cockpit-table-scroll--journal">
+              <table className="trades-table cockpit-table pro">
+                <thead>
+                  <tr>
+                    <th>Date (IST)</th>
+                    <th className="num">Trades</th>
+                    <th className="num">P&amp;L</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.entries(report.by_day).map(([day, row]) => (
+                    <tr key={day}>
+                      <td>{day}</td>
+                      <td className="num">{row.count}</td>
+                      <td className={`num mono ${pnlClass(Number(row.pnl))}`}>
+                        {formatInr(Number(row.pnl))}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        ) : null}
+
+        <section className="cockpit-panel orderbook-table-panel">
+          <header className="cockpit-panel-head">
+            <h3>Closed trades</h3>
+            <span className="logs-range-pill mono muted">{trades.length} closed</span>
+          </header>
+
+          {trades.length === 0 ? (
+            <p className="blotter-empty decision-log-empty">
+              {loading
+                ? "Loading trades…"
+                : "No closed trades in this date range"}
+            </p>
+          ) : (
+            <div className="cockpit-table-scroll cockpit-table-scroll--journal orderbook-trades-scroll">
+              <table className="trades-table cockpit-table pro">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Date</th>
+                    <th>Entry</th>
+                    <th>Exit</th>
+                    <th>Hold</th>
+                    <th>Contract</th>
+                    <th>Side</th>
+                    <th>Setup</th>
+                    <th className="num">Lots</th>
+                    <th className="num">Entry ₹</th>
+                    <th className="num">Exit ₹</th>
+                    <th className="num">P&amp;L</th>
+                    <th>Exit reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trades.map((t, i) => {
+                    const pnl = Number(t.pnl);
+                    return (
+                      <tr key={t.id}>
+                        <td className="muted">{trades.length - i}</td>
+                        <td>{formatDate(t.exit_ts)}</td>
+                        <td className="mono">{formatTs(t.entry_ts)}</td>
+                        <td className="mono">{formatTs(t.exit_ts)}</td>
+                        <td>{holdLabel(t.hold_seconds)}</td>
+                        <td className="mono">{t.tsym ?? "—"}</td>
+                        <td>{t.side ?? "—"}</td>
+                        <td>{t.setup_type}</td>
+                        <td className="num">
+                          {t.lots ?? "—"}
+                          {t.lot_size ? ` × ${t.lot_size}` : ""}
+                        </td>
+                        <td className="num mono">{formatPrice(t.entry_price)}</td>
+                        <td className="num mono">{formatPrice(t.exit_price)}</td>
+                        <td className={`num mono ${pnlClass(pnl)}`}>{formatInr(pnl)}</td>
+                        <td className="reason-cell">{t.exit_reason}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot>
+                  <tr>
+                    <td colSpan={11} className="orderbook-tfoot-label">
+                      Period realized P&amp;L
+                    </td>
+                    <td className={`num mono ${pnlClass(summary?.total_pnl ?? 0)}`}>
+                      {formatInr(summary?.total_pnl ?? 0)}
+                    </td>
+                    <td />
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          )}
+        </section>
       </div>
-    </>
+    </AppPageShell>
   );
 }

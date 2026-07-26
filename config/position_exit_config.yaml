@@ -1,24 +1,44 @@
-# Exit when momentum / structure turns unfavorable (not fixed ₹ SL/target).
-# Priority: trend reversal → early_invalidation → adverse → trail → time stop.
+# Exit: confidence-scaled ~4% hard SL; breakeven trail when green; +2% step trail after +4% MFE.
+# Priority: force/session end → hard SL → trail → trend reversal (after min hold).
 mode: momentum
 bias_flip_exit: true
-bias_flip_buffer_points: 10
+bias_flip_buffer_points: 35
 flip_on_trend_reversal: false
 
-# Wait longer before any exit evaluation (avoids tick noise right after fill).
-min_hold_seconds: 30
-max_hold_minutes: 20
+min_hold_seconds: 15
+trend_reversal_min_hold_seconds: 180
+trend_reversal_skip_when_profitable: true
+trend_reversal_only_if_underwater: true
+trend_reversal_defer_if_had_mfe: true
+trend_reversal_min_mfe_pct: 3
 
-# Early cut when trade never went green (caps adverse_momentum traps).
+max_hold_minutes: 25
+skip_time_stop_when_profitable: true
+
+max_loss_inr_per_trade: 0
+
+# Up to 4% stop at high confidence; ~3% at base confidence (76).
+adverse_move_pct_from_entry: 4
+adverse_move_min_pct: 3
+confidence_adverse_scaling: true
+adverse_base_confidence: 76
+adverse_max_confidence: 100
+high_vol_adverse_move_pct_from_entry: 4
+
 early_invalidation_enabled: true
 early_invalidation_min_hold_seconds: 45
-# MFE never reached this % of entry → still "no green"
-early_invalidation_max_mfe_pct: 3
-# Cut if loss reaches this % while never green (vs full adverse 12%).
-early_invalidation_loss_pct: 7
+early_invalidation_max_mfe_pct: 2
+early_invalidation_loss_pct: 5
+# ORB is volatile at the open — use adverse stop only, not the tight early cut.
+early_invalidation_exempt_setups:
+  - opening_range_breakout
 
-trail_giveback_pct: 35
-adverse_move_pct_from_entry: 12
-min_profit_before_trail_pct: 12
-high_vol_trail_giveback_pct: 30
-high_vol_adverse_move_pct_from_entry: 10
+# Once green → SL at entry; above +4% MFE → lock (peak% - 2%).
+trail_step_arm_mfe_pct: 4
+trail_step_buffer_pct: 2
+
+expiry_day_exit:
+  adverse_move_pct_from_entry: 4
+  early_invalidation_loss_pct: 4
+  early_invalidation_min_hold_seconds: 25
+  trend_reversal_min_hold_seconds: 120

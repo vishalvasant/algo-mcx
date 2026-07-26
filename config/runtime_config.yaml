@@ -1,12 +1,30 @@
 event_queue_max_size: 10000
 reconciliation_interval_seconds: 60
 option_quote_sample_interval_seconds: 1
-scan_interval_seconds: 30
+scan_interval_seconds: 10
 # Backtest only: mark exits this often (live ≈ WS/REST quote pace).
 backtest_exit_interval_seconds: 2
 rest_quote_poll_interval_seconds: 30
+rest_index_poll_interval_seconds: 10
 rest_quote_poll_interval_market_seconds: 2
 # When a holding gets no WS tick for this long, REST poll that token (1s loop).
 holding_ws_stale_seconds: 3
 holding_rest_poll_seconds: 1
-watchlist_stream_interval_ms: 750
+watchlist_stream_interval_ms: 250
+# REST backup for option-chain LTP/OI when WebSocket is thin.
+chain_rest_poll_seconds: 8
+# Poll individual chain tokens when no WS tick for this many seconds.
+option_ws_stale_seconds: 1.5
+option_stale_poll_batch: 12
+
+# Daily archive + purge for log tables (keeps DB small).
+# Rows older than keep_days (IST) are written to archive_dir then deleted.
+log_retention:
+  enabled: true
+  keep_days: 1
+  run_at_ist: "15:35"
+  archive_dir: ./data/archives
+  tables:
+    - system_events
+    - notifications
+    - field_availability_log

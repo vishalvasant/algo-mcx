@@ -1,31 +1,26 @@
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import {
-  Activity,
-  Bell,
-  BookOpen,
-  Briefcase,
-  LayoutDashboard,
-  LineChart,
-  LogOut,
-  Radio,
-  ScrollText,
-  User,
-} from "lucide-react";
+import { Outlet, useLocation, useNavigate, useOutletContext } from "react-router-dom";
 import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "../auth/AuthContext";
-import { fetchHealth, fetchMarketSummary } from "../api/client";
-import type { EngineHealth, MarketSummary } from "../types";
-import { MarketTicker } from "./MarketTicker";
-import { StatusBadge } from "./StatusBadge";
+import { fetchHealth, fetchMarketSummary, fetchWatchlist, openWatchlistStream } from "../api/client";
+import type { EngineHealth, MarketSummary, Watchlist } from "../types";
+import { MarketStatsPanel } from "./cockpit/MarketStatsPanel";
+import { GlobalTopHeader } from "./GlobalTopHeader";
+import { CockpitEngineControls } from "./CockpitEngineControls";
+import { RefSidebarFooter, RefSidebarNav } from "./RefSidebarNav";
+import { AppPageFooter } from "./AppPageFooter";
+import { useIndexQuotes } from "../hooks/useIndexQuotes";
+import { mergeHeaderCommodities } from "../utils/headerCommodities";
 
-const links = [
-  { to: "/", label: "Terminal", icon: LayoutDashboard },
-  { to: "/holdings", label: "Holdings", icon: Briefcase },
-  { to: "/trades", label: "P&L", icon: LineChart },
-  { to: "/order-book", label: "Order Book", icon: BookOpen },
-  { to: "/logs", label: "Decision Logs", icon: ScrollText },
-  { to: "/notifications", label: "Alerts", icon: Bell },
-];
+export interface DashboardOutletContext {
+  activeCommodity: string;
+  setActiveCommodity: (v: string) => void;
+  watchlist: Watchlist | null;
+  summary: MarketSummary | null;
+}
+
+export function useDashboardOutlet() {
+  return useOutletContext<DashboardOutletContext>();
+}
 
 function useIstClock() {
   const [now, setNow] = useState("");
@@ -37,6 +32,7 @@ function useIstClock() {
           hour: "2-digit",
           minute: "2-digit",
           second: "2-digit",
+          hour12: true,
         }),
       );
     };
@@ -54,6 +50,10 @@ export function Layout() {
   const ist = useIstClock();
   const [health, setHealth] = useState<EngineHealth | null>(null);
   const [summary, setSummary] = useState<MarketSummary | null>(null);
+  const [watchlist, setWatchlist] = useState<Watchlist | null>(null);
+  const [activeCommodity, setActiveCommodity] = useState("GOLD");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const isDashboard = location.pathname === "/";
 
   const load = useCallback(() => {
     fetchHealth().then(setHealth).catch(() => setHealth(null));
@@ -66,83 +66,113 @@ export function Layout() {
     return () => clearInterval(id);
   }, [load]);
 
-  const pageTitle =
-    links.find((l) => l.to === location.pathname)?.label ?? "Algo-MCX";
+  useEffect(() => {
+    fetchWatchlist().then(setWatchlist).catch(() => setWatchlist(null));
+    const stop = openWatchlistStream(
+      (wl) => setWatchlist(wl),
+      () => {
+        fetchWatchlist().then(setWatchlist).catch(() => undefined);
+      },
+    );
+    const id = setInterval(() => {
+      fetchWatchlist().then(setWatchlist).catch(() => setWatchlist(null));
+    }, 5000);
+    return () => {
+      stop();
+      clearInterval(id);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!watchlist?.commodities?.length) return;
+    if (!watchlist.commodities.some((c) => c.underlying === activeCommodity)) {
+      setActiveCommodity(watchlist.commodities[0].underlying);
+    }
+  }, [watchlist?.commodities, activeCommodity]);
+
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    document.body.style.overflow = sidebarOpen ? "hidden" : "";
+    return () => {
+      document.body.style.overflow = "";
+    };
+  }, [sidebarOpen]);
+
+  const commodities = mergeHeaderCommodities(
+    watchlist?.commodities ??
+      summary?.commodities ?? [
+        { underlying: "GOLD", display_name: "Gold", spot_ltp: null, atm_strike: null },
+      ],
+  );
+
+  const indexQuotes = useIndexQuotes(commodities);
 
   const handleLogout = async () => {
     await logout();
     navigate("/login");
   };
 
-  const sessionTone =
-    summary?.market_session === "OPEN"
-      ? "success"
-      : summary?.market_session === "PRE_MARKET"
-        ? "warning"
-        : "neutral";
+  const refreshDashboardData = useCallback(async () => {
+    load();
+    try {
+      const wl = await fetchWatchlist();
+      setWatchlist(wl);
+    } catch {
+      setWatchlist(null);
+    }
+  }, [load]);
+
+  const outletContext: DashboardOutletContext = {
+    activeCommodity,
+    setActiveCommodity,
+    watchlist,
+    summary,
+  };
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-icon">AM</div>
-          <div>
-            <h1>Algo-MCX</h1>
-            <p>Gold · Silver · Gas</p>
+    <div className={`app-shell app-shell-dashboard ref-layout${sidebarOpen ? " ref-sidebar-open" : ""}`}>
+      <GlobalTopHeader
+        commodities={indexQuotes}
+        active={activeCommodity}
+        onChange={setActiveCommodity}
+        brokerConnected={health?.broker_connected}
+        clock={ist}
+        onMenuToggle={() => setSidebarOpen((open) => !open)}
+        hideIndexCards={watchlist?.watchlist_mode === "futures"}
+        engineControls={
+          <CockpitEngineControls onDataRefresh={refreshDashboardData} onLogout={handleLogout} />
+        }
+      />
+
+      <div className="ref-body">
+        <button
+          type="button"
+          className="ref-sidebar-backdrop"
+          aria-label="Close navigation"
+          onClick={() => setSidebarOpen(false)}
+        />
+        <aside className={`sidebar ref-sidebar${sidebarOpen ? " is-open" : ""}`}>
+          <RefSidebarNav alertCount={summary?.unread_notifications ?? 0} />
+          <div className="sidebar-widgets">
+            <MarketStatsPanel watchlist={watchlist} summary={summary} activeCommodity={activeCommodity} />
           </div>
+          <RefSidebarFooter
+            status={health?.status}
+            username={username ?? undefined}
+            brokerOn={health?.broker_connected}
+            onLogout={handleLogout}
+          />
+        </aside>
+
+        <div className="main ref-main">
+          <main className={isDashboard ? "content content-cockpit" : "content content-page"}>
+            <Outlet context={outletContext} />
+          </main>
+          {!isDashboard ? <AppPageFooter summary={summary} health={health} /> : null}
         </div>
-        <nav className="nav">
-          {links.map(({ to, label, icon: Icon }) => (
-            <NavLink key={to} to={to} end={to === "/"}>
-              <Icon size={18} />
-              <span>{label}</span>
-              {to === "/notifications" && (summary?.unread_notifications ?? 0) > 0 && (
-                <span className="nav-badge">{summary?.unread_notifications}</span>
-              )}
-            </NavLink>
-          ))}
-        </nav>
-        <div className="sidebar-footer">
-          <div className="sidebar-status">
-            <Activity size={14} />
-            <span>{health?.status ?? "—"}</span>
-          </div>
-          <div className="sidebar-user">
-            <User size={12} />
-            <span>{username}</span>
-          </div>
-        </div>
-      </aside>
-
-      <div className="main">
-        <header className="topbar">
-          <div className="topbar-left">
-            <div className="topbar-title">{pageTitle}</div>
-            <div className="topbar-clock mono">{ist} IST</div>
-          </div>
-          <div className="topbar-meta">
-            <StatusBadge severity={sessionTone} label={summary?.market_session ?? "—"} />
-            {health?.broker_connected ? (
-              <StatusBadge severity="success" label="Broker LIVE" />
-            ) : (
-              <StatusBadge severity="warning" label="Broker OFF" />
-            )}
-            <span className="live-pill">
-              <Radio size={12} />
-              LIVE
-            </span>
-            <button className="btn btn-ghost btn-sm" onClick={handleLogout} type="button">
-              <LogOut size={14} />
-              Logout
-            </button>
-          </div>
-        </header>
-
-        <MarketTicker summary={summary} spotLtp={health?.spot_ltp} />
-
-        <main className="content">
-          <Outlet />
-        </main>
       </div>
     </div>
   );

@@ -37,6 +37,7 @@ STRATEGY_NAMES: list[str] = [
   "mean_reversion",
   "liquidity_sweep",
   "expiry_scalping",
+  "peak_reversal_fade",
 ]
 
 # Dedicated scanners already enforce setup+trigger alignment.
@@ -47,6 +48,8 @@ _DEDICATED = {
 }
 
 _BIAS_EXEMPT = frozenset({"mean_reversion", "liquidity_sweep", "reversal"})
+# Fade primary trend: PE in bull, CE in bear (opposite of normal bias alignment).
+_COUNTER_BIAS_FADE = frozenset({"peak_reversal_fade"})
 
 # These must also have a 1m trigger in features.extra before entry.
 _REQUIRE_PULLBACK_TRIGGER = frozenset({"vwap_bounce", "vwap_pullback"})
@@ -169,10 +172,29 @@ class FeatureSetupScanner:
     if setup not in ("bull", "bear"):
       return None
 
-    if self.name not in _BIAS_EXEMPT and features.bias_5m == Bias.NEUTRAL:
-      return None
+    if self.name not in _BIAS_EXEMPT and self.name not in _COUNTER_BIAS_FADE:
+      if features.bias_5m == Bias.NEUTRAL:
+        return None
 
-    if self.name not in _BIAS_EXEMPT:
+    if self.name in _COUNTER_BIAS_FADE:
+      if setup == "bear" and features.bias_5m != Bias.BULLISH:
+        return None
+      if setup == "bull" and features.bias_5m != Bias.BEARISH:
+        return None
+      signals = extra.get("counter_bias_signals") or []
+      cb_cfg = self._config.strategy.get("counter_bias") or {}
+      min_sigs = int(cb_cfg.get("min_reversal_signals", 2))
+      if extra.get("bias_confidence_mismatch"):
+        min_sigs = int(cb_cfg.get("mismatch_min_reversal_signals", 1))
+      if len(signals) < min_sigs:
+        return None
+      mtf_key = "counter_mtf_score_pe" if setup == "bear" else "counter_mtf_score_ce"
+      min_mtf = int(cb_cfg.get("min_counter_mtf_score", 48))
+      if extra.get("bias_confidence_mismatch"):
+        min_mtf = int(cb_cfg.get("mismatch_min_counter_mtf_score", min_mtf - 5))
+      if int(extra.get(mtf_key) or 0) < min_mtf:
+        return None
+    elif self.name not in _BIAS_EXEMPT:
       if setup == "bull" and features.bias_5m != Bias.BULLISH:
         return None
       if setup == "bear" and features.bias_5m != Bias.BEARISH:

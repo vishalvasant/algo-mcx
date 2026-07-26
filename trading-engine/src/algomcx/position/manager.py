@@ -14,6 +14,8 @@ from algomcx.market_data.engine import MarketDataEngine
 from algomcx.models.events import ExecutionRequest, QuoteUpdate, TradingMode
 from algomcx.position.exit_rules import evaluate_momentum_exit
 from algomcx.risk.engine import RiskEngine
+from algomcx.notifications.trade_alerts import build_trade_exit_message
+from algomcx.runtime.trading_mode import get_execution_mode
 
 logger = structlog.get_logger(__name__)
 
@@ -31,6 +33,9 @@ class OpenPosition:
   entry_ts: datetime
   premium_deployed: Decimal
   setup_type: str
+  mode: str = "paper"
+  is_expiry_day: bool = False
+  confidence: int | None = None
   mfe: Decimal = Decimal("0")
   mae: Decimal = Decimal("0")
   last_quote_ts: datetime | None = None
@@ -103,7 +108,13 @@ class PositionManager:
     signal,
     sizing,
     fill_price: Decimal,
+    *,
+    is_expiry_day: bool = False,
+    mode: str | None = None,
   ) -> None:
+    confidence = signal.confidence
+    if confidence is None:
+      confidence = int(signal.scanner_metadata.get("confidence", 0) or 0)
     self._open[position_id] = OpenPosition(
       position_id=position_id,
       order_id=order_id,
@@ -116,6 +127,9 @@ class PositionManager:
       entry_ts=datetime.now(tz=timezone.utc),
       premium_deployed=sizing.premium_required,
       setup_type=signal.setup_type,
+      mode=mode or get_execution_mode(),
+      is_expiry_day=is_expiry_day,
+      confidence=confidence or None,
       signal_snapshot=signal.feature_snapshot.model_dump(mode="json"),
     )
     if self._trade_open_hook is not None:
@@ -152,6 +166,10 @@ class PositionManager:
         cfg=exit_cfg,
         force_exit=force,
         regime_primary=self._regime_primary,
+        quantity=pos.quantity,
+        is_expiry_day=pos.is_expiry_day,
+        confidence=pos.confidence,
+        setup_type=pos.setup_type,
       )
       if decision.should_exit:
         reason = decision.reason or "exit"
@@ -240,10 +258,13 @@ class PositionManager:
       limit_price=exit_price,
       product=self._config.execution.get("product", "MIS"),
       reference_ltp=exit_price,
-      mode=TradingMode.PAPER if self._config.is_paper else TradingMode.LIVE,
+      mode=TradingMode.LIVE if get_execution_mode() == "live" else TradingMode.PAPER,
     )
     exit_order_id = await self._journal.write_order_created(request, pos.candidate_signal_id)
     update = await self._broker.place_order(request)
+    if update.status == "REJECTED":
+      self._open[position_id] = pos
+      raise RuntimeError(update.rejection_reason or "broker rejected exit order")
     await self._journal.write_order_filled(exit_order_id, update)
 
     fill = update.fill_price or exit_price
@@ -261,17 +282,25 @@ class PositionManager:
       pnl=pnl,
       exit_reason=exit_reason,
       hold_seconds=hold_seconds,
+      mode=pos.mode,
     )
-    await self._risk.release_capital(pos.premium_deployed, pnl)
+    await self._risk.release_capital(
+      pos.premium_deployed,
+      pnl,
+      "NIFTY",
+    )
 
     await self._journal.write_notification(
       "trade",
       "info" if pnl >= 0 else "warning",
-      "Trade exit",
-      (
-        f"Exited {pos.tsym} @ ₹{fill} · "
-        f"{'profit' if pnl >= 0 else 'loss'} ₹{abs(pnl):.2f}"
-        + (f" ({exit_reason})" if exit_reason else "")
+      "SELL filled",
+      await build_trade_exit_message(
+        self._risk,
+        tsym=pos.tsym,
+        fill=fill,
+        trade_pnl=pnl,
+        quantity=pos.quantity,
+        exit_reason=exit_reason,
       ),
       related_entity="position",
       related_id=str(pos.position_id),
@@ -343,6 +372,7 @@ class PositionManager:
           p.entry_ts,
           p.mfe,
           p.mae,
+          p.mode,
           o.candidate_signal_id,
           cs.setup_type
         FROM positions p
@@ -374,6 +404,7 @@ class PositionManager:
         entry_ts=row["entry_ts"],
         premium_deployed=prem,
         setup_type=row["setup_type"] or "rehydrated",
+        mode=str(row["mode"] or get_execution_mode()),
         mfe=Decimal(str(row["mfe"] or 0)),
         mae=Decimal(str(row["mae"] or 0)),
         signal_snapshot={},

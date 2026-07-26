@@ -234,7 +234,7 @@ async def mock_trade_flow(
     assert sizing.approved, f"risk blocked: {sizing.rejection_reason}"
 
     await risk.reserve_capital(sizing.premium_required)
-    execution = ExecutionEngine(config, broker, journal)
+    execution = ExecutionEngine(config, broker, journal, risk)
     position_id, order_id, update = await execution.enter(signal, sizing)
     print(
         f"ENTRY FILLED position={position_id} order={order_id} "

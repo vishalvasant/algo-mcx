@@ -1,5 +1,6 @@
 import type {
   AuthUser,
+  ChartCandlesResponse,
   DecisionLogEvent,
   EngineHealth,
   LoginResponse,
@@ -129,6 +130,13 @@ export function setKillSwitch(enabled: boolean): Promise<{ kill_switch: boolean 
   return request(`/control/kill-switch?enabled=${enabled}`, { method: "POST" });
 }
 
+export function setTradingMode(mode: "paper" | "live"): Promise<{
+  ok: boolean;
+  trading_mode: string;
+}> {
+  return request(`/control/trading-mode?mode=${mode}`, { method: "POST" });
+}
+
 export function setAutoTrade(enabled: boolean): Promise<{
   auto_trade_enabled: boolean;
   kill_switch: boolean;
@@ -140,6 +148,8 @@ export function setAutoTrade(enabled: boolean): Promise<{
 
 export function syncMissingData(): Promise<{
   ok: boolean;
+  error?: string;
+  message?: string;
   universe: Record<string, unknown>;
   candles: Record<string, unknown>;
   quotes: Record<string, unknown>;
@@ -148,15 +158,25 @@ export function syncMissingData(): Promise<{
   return request("/control/sync-missing", { method: "POST" });
 }
 
-export function fetchDecisionLogs(
-  limit = 100,
-  eventType?: string,
-): Promise<{
+export interface DecisionLogsResponse {
   scan_interval_seconds: number;
   decisions_today: number;
+  total: number;
+  limit: number;
+  offset: number;
   events: DecisionLogEvent[];
-}> {
-  const q = new URLSearchParams({ limit: String(limit) });
+}
+
+export function fetchDecisionLogs(options: {
+  limit?: number;
+  offset?: number;
+  eventType?: string;
+} = {}): Promise<DecisionLogsResponse> {
+  const { limit = 25, offset = 0, eventType } = options;
+  const q = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  });
   if (eventType) q.set("event_type", eventType);
   return request(`/decision-logs?${q}`);
 }
@@ -179,6 +199,23 @@ export function fetchTradeBlotter(limit = 200): Promise<TradeBlotter> {
   return request<TradeBlotter>(`/trade-blotter?limit=${limit}`);
 }
 
+export function fetchChartCandles(
+  underlying: string,
+  interval = "15m",
+  days = 30,
+  opts?: { token?: string; exchange?: string; tsym?: string },
+): Promise<ChartCandlesResponse> {
+  const params = new URLSearchParams({
+    underlying,
+    interval,
+    days: String(days),
+  });
+  if (opts?.token) params.set("token", opts.token);
+  if (opts?.exchange) params.set("exchange", opts.exchange);
+  if (opts?.tsym) params.set("tsym", opts.tsym);
+  return request<ChartCandlesResponse>(`/chart/candles?${params}`);
+}
+
 export function resetPaperAccount(): Promise<{
   ok: boolean;
   starting_capital: number;
@@ -187,6 +224,24 @@ export function resetPaperAccount(): Promise<{
   instrument_count?: number;
 }> {
   return request("/control/reset-paper-account", { method: "POST" });
+}
+
+export function fetchFlattradeCredentials(): Promise<import("../types").FlattradeCredentialsStatus> {
+  return request("/settings/flattrade");
+}
+
+export function saveFlattradeCredentials(body: {
+  user_id?: string;
+  api_key?: string;
+  api_secret?: string;
+  password?: string;
+  totp_secret?: string;
+  redirect_url?: string;
+}): Promise<import("../types").FlattradeCredentialsStatus> {
+  return request("/settings/flattrade", {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
 }
 
 export function exitPosition(positionId: string): Promise<{
@@ -209,20 +264,42 @@ export function openWatchlistStream(
   onTick: (watchlist: Watchlist) => void,
   onError?: (err: Event) => void,
 ): () => void {
-  const token = getStoredToken();
-  const url = token
-    ? `${API}/quotes/stream?access_token=${encodeURIComponent(token)}`
-    : `${API}/quotes/stream`;
-  const source = new EventSource(url, { withCredentials: true });
-  source.onmessage = (ev) => {
-    try {
-      onTick(JSON.parse(ev.data) as Watchlist);
-    } catch {
-      /* ignore malformed frames */
-    }
+  let source: EventSource | null = null;
+  let closed = false;
+  let retryMs = 1000;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const connect = () => {
+    if (closed) return;
+    const token = getStoredToken();
+    const url = token
+      ? `${API}/quotes/stream?access_token=${encodeURIComponent(token)}`
+      : `${API}/quotes/stream`;
+    source = new EventSource(url, { withCredentials: true });
+    source.onmessage = (ev) => {
+      retryMs = 1000;
+      try {
+        onTick(JSON.parse(ev.data) as Watchlist);
+      } catch {
+        /* ignore malformed frames */
+      }
+    };
+    source.onerror = (err) => {
+      onError?.(err);
+      source?.close();
+      source = null;
+      if (!closed) {
+        retryTimer = setTimeout(connect, retryMs);
+        retryMs = Math.min(retryMs * 2, 10_000);
+      }
+    };
   };
-  source.onerror = (err) => {
-    onError?.(err);
+
+  connect();
+
+  return () => {
+    closed = true;
+    if (retryTimer != null) clearTimeout(retryTimer);
+    source?.close();
   };
-  return () => source.close();
 }

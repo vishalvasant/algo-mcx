@@ -16,6 +16,7 @@ from algomcx.models.events import (
   SystemEvent,
   ValidationResult,
 )
+from algomcx.notifications.telegram import maybe_send_telegram_alert
 
 logger = structlog.get_logger(__name__)
 
@@ -115,6 +116,12 @@ class JournalWriter:
                 related_entity,
                 related_id,
             )
+        await maybe_send_telegram_alert(
+            type_=type_,
+            severity=severity,
+            title=title,
+            message=message,
+        )
 
     async def log_field_availability(
         self, field_name: str, source: str, available: bool, notes: str | None = None
@@ -275,6 +282,7 @@ class JournalWriter:
         pnl,
         exit_reason: str,
         hold_seconds: int,
+        mode: str = "paper",
     ) -> None:
         entry = position.entry_price
         pnl_pct = (pnl / (entry * position.quantity) * 100) if entry > 0 else None
@@ -304,5 +312,5 @@ class JournalWriter:
                 hold_seconds,
                 json.dumps(position.signal_snapshot, default=str),
                 position.setup_type,
-                "paper",
+                mode,
             )

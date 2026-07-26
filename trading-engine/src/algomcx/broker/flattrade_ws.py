@@ -12,9 +12,18 @@ logger = structlog.get_logger(__name__)
 
 
 class FlattradeMarketSocket:
-  """Flattrade API V2 market WebSocket (auth uses t=a / accesstoken, not Shoonya t=c)."""
+  """Flattrade Pi Connect WebSocket — touchline feed per pi.flattrade.in/docs.
+
+  Subscribe payload: {"t": "t", "k": "BFO|token#NFO|token..."}
+  First tick per instrument is t=tk (snapshot), then t=tf (incremental).
+  """
 
   WS_URL = "wss://piconnect.flattrade.in/PiConnectWSAPI/"
+  DEFAULT_CHUNK = 50
+  BFO_CHUNK = 25
+  # websocket-client requires ping_interval > ping_timeout
+  PING_INTERVAL_SEC = 20
+  PING_TIMEOUT_SEC = 10
 
   def __init__(
     self,
@@ -37,11 +46,11 @@ class FlattradeMarketSocket:
 
     self._ws: websocket.WebSocketApp | None = None
     self._thread: threading.Thread | None = None
-    self._hb_thread: threading.Thread | None = None
     self._running = False
     self._connected = False
     self._authed = False
     self._subscribed: list[str] = []
+    self._subscribed_set: set[str] = set()
     self._lock = threading.Lock()
     self._auth_failed = False
 
@@ -52,6 +61,12 @@ class FlattradeMarketSocket:
   @property
   def auth_failed(self) -> bool:
     return self._auth_failed
+
+  @staticmethod
+  def _order_bfo_first(instruments: list[str]) -> list[str]:
+    bfo = [k for k in instruments if k.upper().startswith("BFO|")]
+    rest = [k for k in instruments if not k.upper().startswith("BFO|")]
+    return bfo + rest
 
   def start(self) -> None:
     if self._running:
@@ -82,18 +97,33 @@ class FlattradeMarketSocket:
     if self._thread and self._thread.is_alive():
       self._thread.join(timeout=3)
     self._thread = None
+    with self._lock:
+      self._subscribed = []
+      self._subscribed_set = set()
 
   def subscribe(self, instruments: list[str]) -> None:
+    ordered = self._order_bfo_first(list(dict.fromkeys(instruments)))
     with self._lock:
-      self._subscribed = list(instruments)
-    if self.is_open and instruments:
-      self._send_subscribe(instruments)
+      prev = set(self._subscribed_set)
+      self._subscribed = ordered
+      self._subscribed_set = set(ordered)
+      to_send = ordered if not prev else [k for k in ordered if k not in prev]
+    if self.is_open and to_send:
+      self._send_subscribe(to_send, full_resync=not prev)
+    elif self.is_open and ordered and not to_send:
+      # Universe changed order but same keys — force resync for BFO reliability.
+      self._send_subscribe(ordered, full_resync=True)
 
   def _run(self) -> None:
     assert self._ws is not None
     while self._running and not self._auth_failed:
       try:
-        self._ws.run_forever(ping_interval=30, ping_timeout=10)
+        # Keepalive for long-lived NFO touchline streams (library + Flattrade heartbeat).
+        self._ws.run_forever(
+          ping_interval=self.PING_INTERVAL_SEC,
+          ping_timeout=self.PING_TIMEOUT_SEC,
+          ping_payload='{"t":"h"}',
+        )
       except Exception as exc:
         logger.warning("flattrade_ws_run_exception", error=str(exc))
       self._connected = False
@@ -132,12 +162,11 @@ class FlattradeMarketSocket:
       if status == "OK":
         self._authed = True
         self._auth_failed = False
-        logger.info("flattrade_ws_authenticated")
+        logger.info("flattrade_ws_authenticated", ack=msg_type)
         with self._lock:
           instruments = list(self._subscribed)
         if instruments:
-          self._send_subscribe(instruments)
-        self._ensure_heartbeat()
+          self._send_subscribe(instruments, full_resync=True)
         if self._on_open:
           self._on_open()
       else:
@@ -156,7 +185,6 @@ class FlattradeMarketSocket:
       self._on_quote(data)
 
   def _handle_error(self, _ws: Any, error: Any) -> None:
-    # Auth rejection also shows up as dict via message path; socket errors are noisy.
     err_s = str(error)
     if "opcode=8" in err_s:
       return
@@ -171,34 +199,33 @@ class FlattradeMarketSocket:
     if self._on_close:
       self._on_close()
 
-  def _send_subscribe(self, instruments: list[str]) -> None:
+  def _send_subscribe(self, instruments: list[str], *, full_resync: bool = False) -> None:
     if not self._ws or not instruments:
       return
-    # Flattrade accepts hash-joined keys; batch to stay under message limits.
-    chunk_size = 50
-    for i in range(0, len(instruments), chunk_size):
-      chunk = instruments[i : i + chunk_size]
+    ordered = self._order_bfo_first(instruments)
+    bfo = [k for k in ordered if k.upper().startswith("BFO|")]
+    rest = [k for k in ordered if not k.upper().startswith("BFO|")]
+
+    def _chunks(group: list[str], size: int) -> list[list[str]]:
+      return [group[i : i + size] for i in range(0, len(group), size)]
+
+    batches: list[tuple[list[str], str]] = []
+    for chunk in _chunks(bfo, self.BFO_CHUNK):
+      batches.append((chunk, "BFO"))
+    for chunk in _chunks(rest, self.DEFAULT_CHUNK):
+      batches.append((chunk, "MIX"))
+
+    for chunk, label in batches:
       payload = {"t": "t", "k": "#".join(chunk)}
       try:
         self._ws.send(json.dumps(payload))
+        logger.info(
+          "flattrade_ws_subscribed",
+          batch=label,
+          count=len(chunk),
+          full_resync=full_resync,
+        )
+        time.sleep(0.12)
       except Exception:
-        logger.exception("flattrade_ws_subscribe_failed")
+        logger.exception("flattrade_ws_subscribe_failed", batch=label)
         return
-    logger.info("flattrade_ws_subscribed", count=len(instruments))
-
-  def _ensure_heartbeat(self) -> None:
-    if self._hb_thread and self._hb_thread.is_alive():
-      return
-
-    def _hb() -> None:
-      while self._running and self._authed:
-        time.sleep(30)
-        if not self._running or not self._ws:
-          break
-        try:
-          self._ws.send(json.dumps({"t": "h"}))
-        except Exception:
-          break
-
-    self._hb_thread = threading.Thread(target=_hb, daemon=True, name="flattrade-ws-hb")
-    self._hb_thread.start()

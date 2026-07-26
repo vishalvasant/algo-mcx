@@ -1,5 +1,6 @@
-order_type: LMT
-product: NRML
+# MKT for reliable live fills; exits always use MKT. LMT needs price_buffer_ticks wired in engine.
+order_type: MKT
+product: MIS
 price_buffer_ticks: 1
 max_retry_attempts: 2
 retry_delay_seconds: 1

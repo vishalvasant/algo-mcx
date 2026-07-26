@@ -81,7 +81,7 @@ async def main() -> None:
         import asyncpg
 
         pool = await asyncpg.create_pool(os.environ.get(
-            "DATABASE_URL", "postgresql://algoflat:algoflat@localhost:5432/algoflat"
+            "DATABASE_URL", "postgresql://algomcx:algomcx@localhost:5432/algomcx"
         ), min_size=1, max_size=1)
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
@@ -93,14 +93,14 @@ async def main() -> None:
     # 4) Start trading engine
     print("\n==> Trading engine")
     engine = subprocess.Popen(
-        [str(venv_python), "-m", "algoflat.main"],
+        [str(venv_python), "-m", "algomcx.main"],
         cwd=ROOT,
         env={
             **os.environ,
             "PYTHONUNBUFFERED": "1",
             "CONFIG_DIR": str(ROOT / "config"),
             "DATABASE_URL": os.environ.get(
-                "DATABASE_URL", "postgresql://algoflat:algoflat@localhost:5432/algoflat"
+                "DATABASE_URL", "postgresql://algomcx:algomcx@localhost:5432/algomcx"
             ),
         },
         stdout=subprocess.PIPE,
@@ -113,6 +113,37 @@ async def main() -> None:
         if not health.get("db_ok"):
             _fail("engine db_ok=false")
         _ok(f"engine status={health.get('status')}, broker={health.get('broker_connected')}")
+
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            wl = (await client.get(f"http://127.0.0.1:{ENGINE_PORT}/watchlist")).json()
+            commodities = wl.get("commodities") or []
+            if len(commodities) < 1:
+                _fail(f"expected at least GOLD commodity, got {len(commodities)}")
+            symbols = {c.get("underlying") for c in commodities}
+            if "GOLD" not in symbols:
+                _fail(f"expected GOLD in watchlist commodities, got {symbols}")
+            for c in commodities:
+                ul = c["underlying"]
+                if ul == "GOLD_FUT":
+                    continue
+                strikes = c.get("strike_count") or 0
+                inst = c.get("instrument_count") or len(c.get("items") or [])
+                expiry = c.get("expiry_symbol")
+                if strikes != 11:
+                    _fail(f"{ul}: expected 11 strikes (ATM±5), got {strikes}")
+                if inst != 22:
+                    _fail(f"{ul}: expected 22 contracts, got {inst}")
+                if not expiry:
+                    _fail(f"{ul}: missing expiry_symbol")
+                _ok(f"{ul} expiry={expiry} strikes={strikes} contracts={inst}")
+
+            summary = (await client.get(f"http://127.0.0.1:{ENGINE_PORT}/market-summary")).json()
+            if not summary.get("commodities"):
+                _fail("market-summary missing commodities[]")
+            cap = summary.get("starting_capital")
+            if cap is not None and float(cap) < 40000:
+                _fail(f"expected ~50k aggregate capital, got {cap}")
+            _ok("watchlist + market summary")
     finally:
         engine.terminate()
         try:

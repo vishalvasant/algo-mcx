@@ -10,6 +10,7 @@ from algomcx.features.indicators import (
   ema,
   opening_range,
 )
+from algomcx.features.counter_bias import detect_peak_reversal_fade
 from algomcx.features.mtf_patterns import build_mtf_alignment
 from algomcx.features.setups import detect_all_setups
 from algomcx.market_data.engine import MarketDataEngine
@@ -180,6 +181,7 @@ class FeatureEngine:
       "spread_pct": opt_ctx.get("spread_pct"),
       "option_oi": opt_ctx.get("oi"),
       "option_volume": opt_ctx.get("volume"),
+      "bias_1m": bias_1m.value,
     }
 
     existing = {
@@ -201,7 +203,30 @@ class FeatureEngine:
       is_expiry=self.is_expiry_day,
     )
 
-    mtf = build_mtf_alignment(m1=m1, m3=m3, m5=m5, vwap=vwap, bias=bias)
+    cb_cfg = self._config.strategy.get("counter_bias") or {}
+
+    mtf = build_mtf_alignment(
+      m1=m1,
+      m3=m3,
+      m5=m5,
+      vwap=vwap,
+      bias=bias,
+      structure_5m=structure,
+    )
+
+    counter_bias = detect_peak_reversal_fade(
+      bias=bias,
+      spot=spot,
+      vwap=vwap,
+      m5=m5,
+      m15=m15,
+      ind=ind,
+      mtf_score_ce=mtf.score_ce,
+      mtf_score_pe=mtf.score_pe,
+      cfg=cb_cfg,
+    )
+    if cb_cfg.get("enabled", True):
+      strategy_setups["peak_reversal_fade"] = counter_bias.setup
 
     # Why reclaim/pullback/trend may be inactive (for Decision Logs).
     skip_reasons: list[str] = []
@@ -264,6 +289,16 @@ class FeatureEngine:
       "mtf_patterns": mtf.details,
       "mtf_score_ce": mtf.score_ce,
       "mtf_score_pe": mtf.score_pe,
+      "counter_mtf_score_ce": counter_bias.score_ce,
+      "counter_mtf_score_pe": counter_bias.score_pe,
+      "counter_bias_signals": counter_bias.signals,
+      "counter_bias_m5_labels": counter_bias.m5_labels,
+      "counter_bias_m15_labels": counter_bias.m15_labels,
+      "bias_confidence_mismatch": counter_bias.bias_confidence_mismatch,
+      "mtf_confidence_gap": counter_bias.mtf_confidence_gap,
+      "bias_side_mtf_score": counter_bias.bias_side_mtf_score,
+      "counter_side_mtf_score": counter_bias.counter_side_mtf_score,
+      "counter_bias_trigger": counter_bias.trigger_reason,
     }
 
     return FeatureSnapshot(

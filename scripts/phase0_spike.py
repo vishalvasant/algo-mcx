@@ -48,6 +48,10 @@ async def main() -> None:
     await broker.connect()
     print("OK: session established")
 
+    from algomcx.symbols_util import resolve_all_spot_tokens
+
+    await resolve_all_spot_tokens(config, broker)
+
     exchange = config.symbols["exchange_spot"]
     token = config.symbols["spot_token"]
     end = datetime.now(tz=timezone.utc)

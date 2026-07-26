@@ -15,16 +15,25 @@ from algomcx.models.events import (
   OrderUpdate,
   TradingMode,
 )
-from algomcx.risk.engine import EntrySizing
+from algomcx.risk.engine import EntrySizing, RiskEngine
+from algomcx.notifications.trade_alerts import build_trade_entry_message
+from algomcx.runtime.trading_mode import get_execution_mode
 
 logger = structlog.get_logger(__name__)
 
 
 class ExecutionEngine:
-  def __init__(self, config: AppConfig, broker: BrokerAdapter, journal: JournalWriter) -> None:
+  def __init__(
+    self,
+    config: AppConfig,
+    broker: BrokerAdapter,
+    journal: JournalWriter,
+    risk: RiskEngine,
+  ) -> None:
     self._config = config
     self._broker = broker
     self._journal = journal
+    self._risk = risk
     self._exec_cfg = config.execution
 
   async def enter(
@@ -47,11 +56,13 @@ class ExecutionEngine:
       limit_price=sizing.entry_ltp,
       product=self._exec_cfg.get("product", "MIS"),
       reference_ltp=sizing.entry_ltp,
-      mode=TradingMode.PAPER if self._config.is_paper else TradingMode.LIVE,
+      mode=TradingMode.LIVE if get_execution_mode() == "live" else TradingMode.PAPER,
     )
 
     order_id = await self._journal.write_order_created(request, signal.id)
     update = await self._broker.place_order(request)
+    if update.status == "REJECTED":
+      raise RuntimeError(update.rejection_reason or "broker rejected order")
     await self._journal.write_order_filled(order_id, update)
 
     position_id = await self._journal.write_position_opened(
@@ -65,20 +76,24 @@ class ExecutionEngine:
     )
 
     fill = update.fill_price or sizing.entry_ltp
-    premium = (fill or Decimal("0")) * sizing.quantity
+    entry_message = await build_trade_entry_message(
+      self._risk,
+      tsym=signal.tsym,
+      fill=fill or Decimal("0"),
+      quantity=sizing.quantity,
+      setup_type=signal.setup_type,
+    )
     await self._journal.write_notification(
       "trade",
       "info",
-      "Trade entry",
-      (
-        f"Took {signal.tsym} @ ₹{fill} · "
-        f"premium ₹{premium:.2f} ({sizing.quantity} qty)"
-      ),
+      "BUY filled",
+      entry_message,
       related_entity="position",
       related_id=str(position_id),
     )
     logger.info(
-      "paper_entry_filled",
+      "entry_filled",
+      mode=get_execution_mode(),
       tsym=signal.tsym,
       qty=sizing.quantity,
       fill=str(update.fill_price),

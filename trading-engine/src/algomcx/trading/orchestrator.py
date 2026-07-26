@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
 
 from pathlib import Path
-from typing import Any
 
 from algomcx.config import AppConfig
 from algomcx.contract_selector.expiry import parse_expiry_tag
@@ -34,12 +34,13 @@ from algomcx.option_data.layer import OptionDataLayer
 from algomcx.position.manager import PositionManager
 from algomcx.quality.gate import QualityGate
 from algomcx.regime.classifier import RegimeClassifier
-from algomcx.risk.engine import RiskEngine
+from algomcx.risk.engine import RiskEngine, overlay_live_limits
+from algomcx.runtime.trading_mode import get_execution_mode, is_live_execution
+from algomcx.broker.routed import RoutedBrokerAdapter
 from algomcx.scanner.library import build_strategy_scanners
 from algomcx.strategy.router import StrategyRouter
 from algomcx.validator.engine import RuleValidator
-
-from algomcx.symbols_util import list_underlyings
+from algomcx.symbols_util import list_underlyings, price_context
 
 logger = structlog.get_logger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -74,7 +75,7 @@ class TradingOrchestrator:
     self.router = StrategyRouter(config, scanners, self.quality)
     self.validator = RuleValidator(config)
     self.risk = RiskEngine(config)
-    self.execution = ExecutionEngine(config, broker, journal)
+    self.execution = ExecutionEngine(config, broker, journal, self.risk)
     self.positions = PositionManager(
       config, broker, journal, self.risk, market_data
     )
@@ -91,12 +92,19 @@ class TradingOrchestrator:
       str(u.get("symbol", "")).upper()
       for u in list_underlyings(config)
       if u.get("symbol")
-    ]
+    ] or [str(config.symbols.get("underlying", "GOLD")).upper()]
     self._scan_underlying_idx = 0
     self._switch_underlying: Any | None = None
 
   def set_underlying_switcher(self, callback) -> None:
     self._switch_underlying = callback
+
+  def _active_underlying(self) -> str:
+    return str(self._config.symbols.get("underlying", "GOLD")).upper()
+
+  def _open_count_for(self, underlying: str) -> int:
+    ul = underlying.upper()
+    return sum(1 for p in self.positions.open_positions if p.tsym.upper().startswith(ul))
 
   def _on_trade_closed(self, setup_type: str, pnl: Decimal, exit_reason: str) -> None:
     self.learner.record_trade(setup_type, pnl, exit_reason=exit_reason)
@@ -105,6 +113,7 @@ class TradingOrchestrator:
     self._universe = universe
 
   async def initialize(self) -> None:
+    await self.risk.ensure_daily_state()
     snap = await self.risk.ensure_daily_state()
     await self._load_prior_day_levels()
     logger.info(
@@ -127,9 +136,10 @@ class TradingOrchestrator:
           continue
         start = datetime.combine(d, time(9, 15), tzinfo=IST).astimezone(timezone.utc)
         end = datetime.combine(d, time(15, 30), tzinfo=IST).astimezone(timezone.utc)
+        exchange, token = price_context(self._config.symbols)
         rows = await self._broker.get_candles(
-          self._config.symbols["exchange_spot"],
-          self._config.symbols["spot_token"],
+          exchange,
+          token,
           CandleInterval.M5,
           start,
           end,
@@ -266,12 +276,10 @@ class TradingOrchestrator:
       self._scan_underlying_idx += 1
       try:
         await self._switch_underlying(symbol)
+        await self._market_data.backfill_today()
+        await self._load_prior_day_levels()
       except Exception:
         logger.exception("underlying_switch_failed", symbol=symbol)
-        return
-
-    if self._universe is None:
-      return
 
     refreshed = await self._market_data.refresh_session_candles()
     if refreshed:
@@ -340,7 +348,10 @@ class TradingOrchestrator:
     # Persist every scan decision so the Decision Logs page stays current.
     if self._log_every:
       meta = decision.model_dump(mode="json")
+      meta["scan_underlying"] = self._active_underlying()
       meta["scan_interval_seconds"] = self._scan_interval_sec
+      meta["candles_stale"] = self._market_data.candles_stale()
+      meta["m1_bars"] = len(m1)
       meta["ce_ltp"] = float(ce_state.ltp) if ce_state and ce_state.ltp is not None else None
       meta["pe_ltp"] = float(pe_state.ltp) if pe_state and pe_state.ltp is not None else None
       await self._journal.write_system_event(
@@ -365,6 +376,26 @@ class TradingOrchestrator:
         pullback=(features.extra or {}).get("setup_vwap_pullback"),
         pe_ltp=str(pe_state.ltp) if pe_state and pe_state.ltp is not None else None,
         ce_ltp=str(ce_state.ltp) if ce_state and ce_state.ltp is not None else None,
+      )
+      return
+
+    from algomcx.market_session import is_entry_window_open
+
+    if not is_entry_window_open(self._config.validator):
+      await self._journal.write_system_event(
+        SystemEvent(
+          event_type="entry_skipped",
+          ts=datetime.now(tz=timezone.utc),
+          severity="debug",
+          message=f"Signal {signal.setup_type} skipped — outside entry window",
+          metadata={
+            "setup": signal.setup_type,
+            "side": signal.side,
+            "reason": "outside_entry_window",
+            "entry_start": self._config.validator.get("entry_start_time"),
+            "entry_end": self._config.validator.get("entry_end_time"),
+          },
+        )
       )
       return
 
@@ -457,6 +488,9 @@ class TradingOrchestrator:
       return
 
     risk_snap = await self.risk.ensure_daily_state()
+    if is_live_execution() and isinstance(self._broker, RoutedBrokerAdapter):
+      limits = await self._broker.live_broker.get_account_limits()
+      risk_snap = overlay_live_limits(risk_snap, limits)
     if risk_snap.kill_switch or risk_snap.entries_blocked:
       await self._journal.write_system_event(
         SystemEvent(
@@ -509,13 +543,31 @@ class TradingOrchestrator:
     )
     await self._journal.write_validation(validation)
     if not validation.passed:
+      await self._journal.write_system_event(
+        SystemEvent(
+          event_type="entry_skipped",
+          ts=signal.ts,
+          severity="info",
+          message=f"Validation failed: {', '.join(validation.rejection_reasons[:4])}",
+          metadata={
+            "setup": signal.setup_type,
+            "side": signal.side,
+            "tsym": signal.tsym,
+            "confidence": signal.confidence,
+            "underlying": self._active_underlying(),
+            "block_reason": validation.rejection_reasons[0] if validation.rejection_reasons else "validation_failed",
+            "rejection_reasons": validation.rejection_reasons,
+          },
+        )
+      )
       return
 
     sizing = await self.risk.size_entry(
       signal,
       opt_for_signal,
       risk_snap,
-      open_position_count=self.positions.open_count,
+      open_position_count=self._open_count_for(self._active_underlying()),
+      is_expiry_day=is_expiry,
     )
     if not sizing.approved:
       await self._journal.write_notification(
@@ -535,7 +587,7 @@ class TradingOrchestrator:
       )
       return
 
-    await self.risk.reserve_capital(sizing.premium_required)
+    await self.risk.reserve_capital(sizing.premium_required, self._active_underlying())
     try:
       position_id, order_id, update = await self.execution.enter(signal, sizing)
       self.positions.register_open(
@@ -545,9 +597,13 @@ class TradingOrchestrator:
         signal,
         sizing,
         update.fill_price or sizing.entry_ltp,
+        is_expiry_day=is_expiry,
+        mode=get_execution_mode(),
       )
     except Exception:
-      await self.risk.release_capital(sizing.premium_required, Decimal("0"))
+      await self.risk.release_capital(
+        sizing.premium_required, Decimal("0"), self._active_underlying()
+      )
       logger.exception("paper_entry_failed", tsym=signal.tsym)
       raise
 

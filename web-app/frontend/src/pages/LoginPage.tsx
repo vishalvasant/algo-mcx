@@ -38,7 +38,7 @@ export function LoginPage() {
           <div className="brand-icon lg">AM</div>
           <div>
             <h1>Algo-MCX</h1>
-            <p>MCX Gold · Silver · Natural Gas</p>
+            <p>Professional Gold Options Terminal</p>
           </div>
         </div>
 

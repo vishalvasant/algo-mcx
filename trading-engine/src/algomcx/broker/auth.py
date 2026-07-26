@@ -13,7 +13,7 @@ import httpx
 import pyotp
 import structlog
 
-from algomcx.config import EnvSettings
+from algomcx.broker.credentials import FlattradeConfig
 
 logger = structlog.get_logger(__name__)
 
@@ -172,20 +172,23 @@ class FlattradeSessionStore:
         )
 
 
-def resolve_session(env: EnvSettings, token_file: Path | None = None) -> FlattradeSession | None:
+def resolve_session(
+    cfg: FlattradeConfig,
+    token_file: Path | None = None,
+) -> FlattradeSession | None:
     """Resolve active session from env var or token file cache."""
-    if env.flattrade_access_token:
-        user_id = env.flattrade_user_id or ""
+    if cfg.access_token:
+        user_id = cfg.user_id or ""
         now = datetime.now(tz=IST)
         return FlattradeSession(
             user_id=user_id,
-            access_token=env.flattrade_access_token,
+            access_token=cfg.access_token,
             obtained_at=now,
             expires_at=next_token_expiry(now),
             source="env",
         )
 
-    path = token_file or Path(env.flattrade_token_file or ".flattrade/session.json")
+    path = token_file or Path(cfg.token_file or ".flattrade/session.json")
     return FlattradeSessionStore(path).load()
 
 
@@ -265,27 +268,27 @@ async def automated_login_with_credentials(
     )
 
 
-async def login_and_save(env: EnvSettings, *, force: bool = False) -> FlattradeSession:
+async def login_and_save(cfg: FlattradeConfig, *, force: bool = False) -> FlattradeSession:
     """Try automated login if password+TOTP configured; otherwise raise with browser hint."""
-    if not env.flattrade_api_key or not env.flattrade_api_secret:
+    if not cfg.api_key or not cfg.api_secret:
         raise ValueError("FLATTRADE_API_KEY and FLATTRADE_API_SECRET are required")
-    if not env.flattrade_user_id:
+    if not cfg.user_id:
         raise ValueError("FLATTRADE_USER_ID is required")
 
-    store = FlattradeSessionStore(Path(env.flattrade_token_file))
+    store = FlattradeSessionStore(Path(cfg.token_file))
     if not force:
         existing = store.load()
         if existing and existing.is_valid:
             return existing
 
-    if env.flattrade_password and env.flattrade_totp_secret:
-        logger.info("flattrade_auto_login_start", user_id=env.flattrade_user_id)
+    if cfg.password and cfg.totp_secret:
+        logger.info("flattrade_auto_login_start", user_id=cfg.user_id)
         session = await automated_login_with_credentials(
-            user_id=env.flattrade_user_id,
-            password=env.flattrade_password,
-            api_key=env.flattrade_api_key,
-            api_secret=env.flattrade_api_secret,
-            totp_secret=env.flattrade_totp_secret,
+            user_id=cfg.user_id,
+            password=cfg.password,
+            api_key=cfg.api_key,
+            api_secret=cfg.api_secret,
+            totp_secret=cfg.totp_secret,
         )
         store.save(session)
         return session
@@ -296,13 +299,13 @@ async def login_and_save(env: EnvSettings, *, force: bool = False) -> FlattradeS
     )
 
 
-async def ensure_session(env: EnvSettings) -> FlattradeSession:
-    session = resolve_session(env)
+async def ensure_session(cfg: FlattradeConfig) -> FlattradeSession:
+    session = resolve_session(cfg)
     if session and session.is_valid:
         return session
 
-    if env.flattrade_password and env.flattrade_totp_secret and env.flattrade_api_key:
-        return await login_and_save(env)
+    if cfg.password and cfg.totp_secret and cfg.api_key:
+        return await login_and_save(cfg)
 
     raise RuntimeError(
         "No valid Flattrade session. Run: python scripts/flattrade_login.py "

@@ -1,21 +1,144 @@
-# MCX commodity options — Gold, Silver, Natural Gas (Flattrade / MCX)
+# MCX futures watchlist (no options on MCX for phase 1)
 underlying: GOLD
+price_source: futures
 exchange_spot: MCX
 exchange_options: MCX
 spot_token: ""
-expiry_type: weekly
+watchlist_mode: futures
+expiry_type: monthly
 atm_strike_steps: 5
 strike_band_points: 2500
 strike_step: 500
 tradable_strike: ATM
-instrument_filter: OPTFUT
+instrument_filter: FUTCOM
+
+futures_watchlist:
+  # —— Bullion ——
+  - group: Gold
+    group_order: 1
+    segment: GOLD
+    search: GOLD
+    display_name: GOLD FUT
+    match_mode: exact
+    exclude_prefixes: [GOLDM, GOLDMINI, GOLDPETAL, GOLDGUINEA]
+    sort_order: 1
+  - group: Gold
+    group_order: 1
+    segment: GOLDM
+    search: GOLDM
+    display_name: GOLDM
+    match_mode: prefix
+    sort_order: 2
+  - group: Gold
+    group_order: 1
+    segment: GOLDMINI
+    search: GOLDMIN
+    display_name: GOLD MINI
+    match_mode: prefix
+    sort_order: 3
+  - group: Silver
+    group_order: 2
+    segment: SILVERMIC
+    search: SILVERMIC
+    display_name: SILVER MICRO
+    match_mode: prefix
+    sort_order: 1
+  - group: Silver
+    group_order: 2
+    segment: SILVERM
+    search: SILVERM
+    display_name: SILVER MINI
+    match_mode: prefix
+    exclude_prefixes: [SILVERMIC]
+    sort_order: 2
+  - group: Silver
+    group_order: 2
+    segment: SILVER
+    search: SILVER
+    display_name: SILVER FUT
+    match_mode: exact
+    exclude_prefixes: [SILVERM, SILVERMIC, SILVERMINI]
+    sort_order: 3
+
+  # —— Energy ——
+  - group: Energy
+    group_order: 3
+    segment: CRUDEOIL
+    search: CRUDEOIL
+    display_name: CRUDE OIL
+    match_mode: exact
+    exclude_prefixes: [CRUDEOILM]
+    sort_order: 1
+  - group: Energy
+    group_order: 3
+    segment: CRUDEOILM
+    search: CRUDEOILM
+    display_name: CRUDE OIL MINI
+    match_mode: prefix
+    sort_order: 2
+  - group: Energy
+    group_order: 3
+    segment: NATURALGAS
+    search: NATURALGAS
+    display_name: NATURAL GAS
+    match_mode: exact
+    exclude_prefixes: [NATURALGASM]
+    sort_order: 3
+  - group: Energy
+    group_order: 3
+    segment: NATURALGASM
+    search: NATURALGASM
+    display_name: NAT GAS MINI
+    match_mode: prefix
+    alt_searches: [NATGASMINI, NATURALGASMINI]
+    sort_order: 4
+
+  # —— Base metals ——
+  - group: Metals
+    group_order: 4
+    segment: COPPER
+    search: COPPER
+    display_name: COPPER
+    match_mode: prefix
+    sort_order: 1
+  - group: Metals
+    group_order: 4
+    segment: ZINC
+    search: ZINC
+    display_name: ZINC
+    match_mode: prefix
+    sort_order: 2
+  - group: Metals
+    group_order: 4
+    segment: ALUMINI
+    search: ALUMINI
+    display_name: ALUMINI
+    match_mode: prefix
+    sort_order: 3
+  - group: Metals
+    group_order: 4
+    segment: LEAD
+    search: LEAD
+    display_name: LEAD
+    match_mode: prefix
+    sort_order: 4
+  - group: Metals
+    group_order: 4
+    segment: NICKEL
+    search: NICKEL
+    display_name: NICKEL
+    match_mode: prefix
+    sort_order: 5
 
 underlyings:
   - symbol: GOLD
     display_name: Gold
+    price_source: futures
+    exchange_futures: MCX
+    exchange_spot: MCX
+    exchange_options: MCX
     option_prefix: GOLD
-    option_search_text: "GOLD OPT"
-    spot_search_text: GOLDM
+    spot_search_text: GOLD
     spot_token: ""
     strike_step: 500
     strike_band_points: 2500
@@ -24,8 +147,11 @@ underlyings:
     fallback_spot: 145500
   - symbol: SILVER
     display_name: Silver
+    price_source: futures
+    exchange_futures: MCX
+    exchange_spot: MCX
+    exchange_options: MCX
     option_prefix: SILVER
-    option_search_text: "SILVER OPT"
     spot_search_text: SILVER
     spot_token: ""
     strike_step: 1000
@@ -35,8 +161,10 @@ underlyings:
     fallback_spot: 231000
   - symbol: NATURALGAS
     display_name: Natural Gas
-    option_prefix: NATURALGAS
-    option_search_text: "NATURALGAS CE"
+    price_source: futures
+    exchange_futures: MCX
+    exchange_spot: MCX
+    exchange_options: MCX
     spot_search_text: NATURALGAS
     spot_token: ""
     strike_step: 5
@@ -44,3 +172,16 @@ underlyings:
     atm_strike_steps: 5
     tick_size: 0.05
     fallback_spot: 280
+  - symbol: CRUDEOIL
+    display_name: Crude Oil
+    price_source: futures
+    exchange_futures: MCX
+    exchange_spot: MCX
+    exchange_options: MCX
+    spot_search_text: CRUDEOIL
+    spot_token: ""
+    strike_step: 50
+    strike_band_points: 250
+    atm_strike_steps: 5
+    tick_size: 1
+    fallback_spot: 6500

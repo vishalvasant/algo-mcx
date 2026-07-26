@@ -1,6 +1,6 @@
 # Algo-MCX
 
-MCX commodity options auto-trader (Gold, Silver, Natural Gas) via **Flattrade**, forked from Algo-Flat.
+MCX Gold futures + options auto-trader via **Flattrade**, forked from Algo-Flat (same layout, process, and features).
 
 ## Quick start
 
@@ -13,15 +13,15 @@ make up                # Docker: UI http://localhost:8081
 
 **Ports (default):** Web `8081`, Engine `8002`, Postgres `5433`, Redis `6380`
 
-## Commodities
+## Phase 1 — Gold only
 
 | Symbol | Exchange | Session |
 |--------|----------|---------|
 | GOLD | MCX | 09:00–23:30 IST |
-| SILVER | MCX | 09:00–23:30 IST |
-| NATURALGAS | MCX | 09:00–23:30 IST |
 
-Scanner rotates across all three each cycle. Dashboard has Gold/Silver/Gas tabs on the options chain.
+Futures price drives spot/candles; options chain is GOLD CE/PE (OPTFUT).
+
+Trading-engine logic tweaks happen **after** backtesting — this repo mirrors algo-flat structure first.
 
 ## Local dev (no Docker)
 
@@ -38,3 +38,12 @@ make dev
 python scripts/flattrade_login.py
 # or use Re-authenticate in the dashboard
 ```
+
+## Deploy
+
+```bash
+git pull origin main
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+After schema changes, migrations apply on engine startup. Use **Re-Authenticate** daily before the MCX session.

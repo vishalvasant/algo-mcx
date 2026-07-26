@@ -1,22 +1,69 @@
-validator_version: validator_v1.3.0_mtf_wait
-entry_start_time: "10:00"
+validator_version: validator_v1.6.0_trading_window
+entry_start_time: "09:15"
 entry_end_time: "22:45"
 max_spread_pct: 1.5
-min_option_volume: 100000
-min_option_oi: 500000
-expiry_day_block_entries: true
-cooldown_after_exit_minutes: 8
-paper_relaxed_liquidity: true
+# Enforced when broker sends volume/OI (skipped only if field missing).
+min_option_volume: 5000
+min_option_oi: 25000
+# Allow expiry-day trades with stricter gates (never hard-block all entries).
+expiry_day_block_entries: false
+cooldown_after_exit_minutes: 2
+# When false, enforce volume/OI/spread when broker provides them (better pre-trade checks).
+paper_relaxed_liquidity: false
 required_fields:
   - ltp
   - bid
   - ask
   - oi
 
+# On weekly expiry: stricter confidence/MTF/setup gates — lot size still follows confidence sizing.
+expiry_day_cautious:
+  enabled: true
+  min_confidence: 78
+  min_mtf_score: 45
+  spot_vwap_buffer_points: 8
+  # Empty allowed_setups = all router strategies OK; use blocked_setups to skip risky types.
+  allowed_setups: []
+  blocked_setups:
+    - vwap_bounce
+    - mean_reversion
+    - liquidity_sweep
+    - reversal
+    - ema_pullback
+
+# Session phases inside entry window — stricter at open/close.
+time_of_day_cautious:
+  enabled: true
+  phases:
+    open:
+      start: "09:15"
+      end: "10:15"
+      min_confidence: 82
+      min_mtf_score: 50
+      allowed_setups:
+        - opening_range_breakout
+        - momentum_continuation
+        - trend_day
+        - gap_and_go
+        - pdh_pdl_break
+    mid:
+      start: "10:15"
+      end: "14:30"
+    late:
+      start: "21:30"
+      end: "22:45"
+      min_confidence: 80
+      min_mtf_score: 52
+      blocked_setups:
+        - opening_range_breakout
+        - gap_and_go
+        - peak_reversal_fade
+        - expiry_scalping
+
 trap_avoidance:
   enabled: true
   require_spot_vwap_alignment: true
-  spot_vwap_buffer_points: 12
+  spot_vwap_buffer_points: 10
   blocked_setups:
     - vwap_bounce
     - mean_reversion
@@ -36,6 +83,28 @@ trap_avoidance:
   require_3m_bars_with_bias: true
   min_3m_bars_with_bias: 2
   require_pullback_trigger: true
-  # Phase B/C — wait until multi-TF candle score is good enough.
   require_mtf_alignment: true
-  min_mtf_score: 55
+  min_mtf_score: 45
+  # ORB / breakout setups need clear range break + structure (weak signals caused live losses).
+  strict_breakout_setups:
+    - opening_range_breakout
+    - gap_and_go
+    - pdh_pdl_break
+  min_mtf_score_breakout: 45
+  or_break_buffer_points: 0
+
+  # Counter-bias fade (peak_reversal_fade): 5m/15m reversal + greeks gate.
+  counter_bias:
+    enabled: true
+    min_extension_points: 18
+    min_reversal_signals: 2
+    min_counter_mtf_score: 48
+    require_1m_turn: true
+    require_greeks: true
+    min_abs_delta: 0.30
+    max_abs_delta: 0.55
+    min_gamma: 0.0004
+    max_iv: 0.85
+    require_oi_confirm: false
+    mismatch_min_extension_points: 12
+    mismatch_min_reversal_signals: 1

@@ -4,6 +4,7 @@ import { Layout } from "./components/Layout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DecisionLogsPage } from "./pages/DecisionLogsPage";
+import { FlattradeSettingsPage } from "./pages/FlattradeSettingsPage";
 import { HoldingsPage } from "./pages/HoldingsPage";
 import { LoginPage } from "./pages/LoginPage";
 import { NotificationsPage } from "./pages/NotificationsPage";
@@ -23,6 +24,7 @@ export default function App() {
             <Route path="trades" element={<TradesPage />} />
             <Route path="order-book" element={<OrderBookPage />} />
             <Route path="logs" element={<DecisionLogsPage />} />
+            <Route path="settings/flattrade" element={<FlattradeSettingsPage />} />
           </Route>
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

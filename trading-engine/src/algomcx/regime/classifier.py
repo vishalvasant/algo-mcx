@@ -98,13 +98,13 @@ class RegimeClassifier:
         scores["sideways"] += 30
         reasons.append("tight_5m_range")
 
-    # Session phase
-    open_t = time(9, 15)
-    minutes = int((now_ist.hour * 60 + now_ist.minute) - (open_t.hour * 60 + open_t.minute))
+    # Session phase (anchored to 09:30 trading window)
+    entry_open = time(9, 30)
+    minutes = int((now_ist.hour * 60 + now_ist.minute) - (entry_open.hour * 60 + entry_open.minute))
     minutes = max(0, minutes)
-    health["minutes_since_open"] = minutes
-    opening_m = int(self._cfg.get("opening_phase_minutes", 30))
-    late_m = int(self._cfg.get("late_phase_after_minutes", 330))
+    health["minutes_since_entry_open"] = minutes
+    opening_m = int(self._cfg.get("session_open_minutes", 45))
+    late_m = int(self._cfg.get("session_late_after_minutes", 300))
     if minutes < opening_m:
       scores["opening_range"] += 25
       reasons.append("opening_phase")
@@ -134,8 +134,9 @@ class RegimeClassifier:
       risk += 25
     if probs.get("sideways", 0) >= 30:
       risk += 20
-    if probs.get("expiry_behaviour", 0) >= 20:
-      risk += 15
+    expiry_risk = int(self._cfg.get("expiry_day_risk_penalty", 0))
+    if expiry_risk > 0 and probs.get("expiry_behaviour", 0) >= 20:
+      risk += expiry_risk
     if health.get("session_phase") == "late":
       risk += 10
     if health.get("session_phase") == "open":
@@ -146,8 +147,16 @@ class RegimeClassifier:
     max_risk = int(self._cfg.get("max_risk_score_to_trade", 75))
     trade_allowed = risk <= max_risk
     if bool(self._cfg.get("block_sideways", True)) and primary == "sideways":
-      trade_allowed = False
-      reasons.append("primary_sideways_blocks_trade")
+      struct = str(health.get("structure_5m") or extra.get("structure_5m") or "")
+      trend_structure = (
+        (features.bias_5m == Bias.BULLISH and struct == "hhhl")
+        or (features.bias_5m == Bias.BEARISH and struct == "lllh")
+      )
+      if trend_structure:
+        reasons.append("sideways_soft_allow_trend_structure")
+      else:
+        trade_allowed = False
+        reasons.append("primary_sideways_blocks_trade")
     if bool(self._cfg.get("block_high_volatility", False)) and primary == "high_volatility":
       trade_allowed = False
       reasons.append("primary_high_vol_blocks_trade")

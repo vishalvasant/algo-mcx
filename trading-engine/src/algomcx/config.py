@@ -22,9 +22,9 @@ def _load_yaml(name: str) -> dict[str, Any]:
 
 def _resolve_env_file() -> str | None:
     candidates = [
-        Path(os.environ.get("ALGOMCX_ENV_FILE", "")),
+        Path(os.environ.get("ALGOFLAT_ENV_FILE", "")),
         Path.cwd() / ".env",
-        Path(__file__).resolve().parents[3] / ".env",  # repo root from src/algoflat/config.py
+        Path(__file__).resolve().parents[3] / ".env",  # repo root from src/algomcx/config.py
         Path(__file__).resolve().parents[2] / ".env",
     ]
     for path in candidates:
@@ -45,12 +45,17 @@ class EnvSettings(BaseSettings):
 
     trading_mode: str = Field(default="paper", alias="TRADING_MODE")
     database_url: str = Field(
-        default="postgresql://algomcx:algomcx@localhost:5433/algomcx",
+        default="postgresql://algomcx:algomcx@localhost:5432/algomcx",
         alias="DATABASE_URL",
     )
     config_dir: str = Field(default="./config", alias="CONFIG_DIR")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
-    redis_url: str | None = Field(default=None, alias="REDIS_URL")
+
+    telegram_bot_token: str | None = Field(default=None, alias="TELEGRAM_BOT_TOKEN")
+    telegram_chat_id: str | None = Field(default=None, alias="TELEGRAM_CHAT_ID")
+    telegram_alerts_enabled: str | None = Field(
+        default=None, alias="TELEGRAM_ALERTS_ENABLED"
+    )
 
     flattrade_user_id: str | None = Field(default=None, alias="FLATTRADE_USER_ID")
     flattrade_api_key: str | None = Field(default=None, alias="FLATTRADE_API_KEY")

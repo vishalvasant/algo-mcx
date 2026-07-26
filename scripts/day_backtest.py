@@ -29,7 +29,7 @@ os.environ.setdefault("STRUCTLOG_LEVEL", "WARNING")
 import logging
 
 logging.basicConfig(level=logging.WARNING)
-for _name in ("algoflat", "httpx", "httpcore"):
+for _name in ("algomcx", "httpx", "httpcore"):
     logging.getLogger(_name).setLevel(logging.WARNING)
 
 from algomcx.broker.auth import ensure_session
@@ -37,6 +37,7 @@ from algomcx.broker.flattrade import FlattradeAdapter
 from algomcx.bus.event_bus import EventBus
 from algomcx.config import AppConfig, EnvSettings, get_config
 from algomcx.contract_selector.resolve import resolve_side_contract
+from algomcx.contract_selector.expiry import format_expiry_tag, next_weekly_expiry_dates
 from algomcx.contract_selector.selector import ContractSelector, ContractUniverse
 from algomcx.contract_selector.strike_picker import atm_band_instruments
 from algomcx.features.chain_intel import build_chain_snapshot
@@ -49,6 +50,7 @@ from algomcx.models.events import (
     CandidateSignal,
     Candle,
     CandleInterval,
+    FeatureSnapshot,
     Instrument,
     OptionState,
 )
@@ -57,6 +59,7 @@ from algomcx.position.exit_rules import evaluate_momentum_exit
 from algomcx.quality.gate import QualityGate
 from algomcx.regime.classifier import RegimeClassifier
 from algomcx.risk.engine import fit_lots_to_capital, lots_for_confidence
+from algomcx.risk.greeks_sizing import greeks_confirmation_multiplier
 from algomcx.scanner.library import build_strategy_scanners
 from algomcx.strategy.router import StrategyRouter
 from algomcx.validator.engine import RuleValidator
@@ -67,8 +70,18 @@ LOT_FALLBACK = 65
 SNAP_ROOT = ROOT / "reports" / "snaps"
 
 
-def _snap_dir(day: date) -> Path:
-    return SNAP_ROOT / day.isoformat()
+def _snap_dir(day: date, underlying: str = "NIFTY") -> Path:
+    return SNAP_ROOT / day.isoformat() / underlying.upper()
+
+
+def _snap_dirs_to_try(day: date, underlying: str = "NIFTY") -> list[Path]:
+    """Per-underlying snap dir, then legacy flat layout (pre dual-index paths)."""
+    ul = underlying.upper()
+    legacy = SNAP_ROOT / day.isoformat()
+    dirs = [_snap_dir(day, ul)]
+    if legacy != dirs[0]:
+        dirs.append(legacy)
+    return dirs
 
 
 def _candle_to_dict(c: Candle) -> dict[str, Any]:
@@ -112,6 +125,7 @@ def _instrument_from_dict(d: dict[str, Any]) -> Instrument:
 def save_day_snap(
     day: date,
     *,
+    underlying: str,
     all_candles: dict[CandleInterval, list[Candle]],
     prior_day: date | None,
     prior_m5: list[Candle],
@@ -122,10 +136,11 @@ def save_day_snap(
 
     This is NOT tick data — Flattrade finest history is 1-minute TPSeries.
     """
-    out = _snap_dir(day)
+    out = _snap_dir(day, underlying)
     out.mkdir(parents=True, exist_ok=True)
     meta = {
         "day": day.isoformat(),
+        "underlying": underlying.upper(),
         "saved_at": datetime.now(tz=IST).isoformat(),
         "source": "flattrade_tpseries",
         "note": (
@@ -178,11 +193,28 @@ def save_day_snap(
     return out
 
 
-def load_day_snap(day: date) -> dict[str, Any] | None:
+def _prior_snap_universe(day: date, underlying: str, *, lookback: int = 8) -> ContractUniverse | None:
+    """Reuse instruments from a recent snap when broker no longer lists expired weeklies."""
+    d = day - timedelta(days=1)
+    for _ in range(lookback):
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        prior = load_day_snap(d, underlying)
+        if prior and prior["universe"].instruments:
+            return prior["universe"]
+        d -= timedelta(days=1)
+    return None
+
+
+def load_day_snap(day: date, underlying: str = "NIFTY") -> dict[str, Any] | None:
     """Load a previously saved day snap. Returns None if incomplete."""
-    out = _snap_dir(day)
     required = ("meta.json", "spot.json", "prior_day.json", "universe.json", "options.json")
-    if not all((out / name).exists() for name in required):
+    out: Path | None = None
+    for candidate in _snap_dirs_to_try(day, underlying):
+        if all((candidate / name).exists() for name in required):
+            out = candidate
+            break
+    if out is None:
         return None
     spot_raw = json.loads((out / "spot.json").read_text())
     all_candles: dict[CandleInterval, list[Candle]] = {}
@@ -356,8 +388,22 @@ def _fit_lots(
     available: Decimal,
     deployed: Decimal,
     equity: Decimal,
+    strike_pick: dict | None = None,
 ) -> tuple[int, Decimal]:
     """Delegate to live RiskEngine sizing (backtest ≡ production)."""
+    greeks_mult = Decimal("1")
+    if strike_pick:
+        stub = CandidateSignal(
+            ts=datetime.now(tz=timezone.utc),
+            setup_type="backtest",
+            side="CE",
+            instrument_token="0",
+            tsym="BT",
+            strategy_version="bt",
+            feature_snapshot=FeatureSnapshot(ts=datetime.now(tz=timezone.utc)),
+            scanner_metadata={"strike_pick": strike_pick},
+        )
+        greeks_mult = greeks_confirmation_multiplier(stub, None, risk_cfg)
     return fit_lots_to_capital(
         risk_cfg,
         confidence=confidence,
@@ -366,6 +412,7 @@ def _fit_lots(
         available=available,
         deployed=deployed,
         equity=equity,
+        greeks_mult=greeks_mult,
     )
 
 
@@ -375,6 +422,61 @@ def _slice_upto(bars: list[Candle], ts: datetime) -> list[Candle]:
 
 def _slice_before(bars: list[Candle], ts: datetime) -> list[Candle]:
     return [c for c in bars if c.ts < ts]
+
+
+def _slice_closed_period(
+    bars: list[Candle], when: datetime, period_min: int
+) -> list[Candle]:
+    """Only bars whose period has fully ended before ``when`` (no forming HTF bar)."""
+    out: list[Candle] = []
+    for c in bars:
+        if c.ts + timedelta(minutes=period_min) <= when:
+            out.append(c)
+    return out
+
+
+def _honest_spot(
+    bar: Candle, when: datetime, prior_m1: list[Candle]
+) -> Decimal:
+    """Spot LTP without peeking at the current minute's close/VWAP."""
+    minute_end = bar.ts + timedelta(minutes=1)
+    if when >= minute_end:
+        return bar.close
+    closed = [c for c in prior_m1 if c.ts < bar.ts]
+    if closed:
+        return closed[-1].close
+    return bar.open
+
+
+def _honest_premium_path(
+    *,
+    when: datetime,
+    bar: Candle,
+    spot: Decimal,
+    side: str,
+    strike: Decimal,
+    expiry: date,
+    option_series: dict[str, list[Candle]],
+    token: str | None,
+) -> tuple[Decimal, str]:
+    """Option mark using last closed 1m candle — no intra-minute close/VWAP peek."""
+    minute_end = bar.ts + timedelta(minutes=1)
+    mark_when = when if when >= minute_end else bar.ts - timedelta(seconds=1)
+    prem, src = _premium_at(
+        when=mark_when,
+        spot=spot,
+        side=side,
+        strike=strike,
+        expiry=expiry,
+        option_series=option_series,
+        token=token,
+    )
+    if when >= minute_end and token and token in option_series:
+        for c in option_series[token]:
+            cts = c.ts if c.ts.tzinfo else c.ts.replace(tzinfo=timezone.utc)
+            if cts == bar.ts and c.close > 0:
+                return c.close, "option_candle_closed"
+    return prem, src
 
 
 def _scan_waypoints(bar: Candle, scan_sec: int) -> list[tuple[datetime, Decimal]]:
@@ -425,6 +527,8 @@ def _live_parity_waypoints(
     *,
     exit_sec: int,
     scan_sec: int,
+    prior_m1: list[Candle] | None = None,
+    honest: bool = False,
 ) -> list[tuple[datetime, Decimal, bool]]:
     """Fine exit ticks + coarser entry scans from 1m snap (not true ticks).
 
@@ -437,9 +541,12 @@ def _live_parity_waypoints(
     t = bar.ts
     while t < end:
         frac = Decimal(str((t - bar.ts).total_seconds() / 60.0))
-        spot = _bar_path_price(
-            bar.open, bar.high, bar.low, bar.close, frac, bar.vwap
-        )
+        if honest:
+            spot = _honest_spot(bar, t, prior_m1 or [])
+        else:
+            spot = _bar_path_price(
+                bar.open, bar.high, bar.low, bar.close, frac, bar.vwap
+            )
         sec = int((t - bar.ts).total_seconds())
         allow_entry = (sec % scan_sec) == 0
         points.append((t, spot, allow_entry))
@@ -450,8 +557,19 @@ def _live_parity_waypoints(
     return points
 
 
-def _forming_m1(bar: Candle, when: datetime, spot: Decimal) -> Candle:
+def _forming_m1(bar: Candle, when: datetime, spot: Decimal, *, honest: bool = False) -> Candle:
     """Synthetic forming 1m bar so bias/setup see current scan price as close."""
+    if honest:
+        return Candle(
+            instrument_token=bar.instrument_token,
+            ts=bar.ts,
+            open=bar.open,
+            high=max(bar.open, spot),
+            low=min(bar.open, spot),
+            close=spot,
+            volume=bar.volume,
+            interval=CandleInterval.M1,
+        )
     return Candle(
         instrument_token=bar.instrument_token,
         ts=bar.ts,
@@ -474,8 +592,21 @@ def _premium_path(
     option_series: dict[str, list[Candle]],
     token: str | None,
     bar_frac: Decimal,
+    bar: Candle | None = None,
+    honest: bool = False,
 ) -> tuple[Decimal, str]:
     """Option premium at an intra-bar tick using that minute's option OHLC path."""
+    if honest and bar is not None:
+        return _honest_premium_path(
+            when=when,
+            bar=bar,
+            spot=spot,
+            side=side,
+            strike=strike,
+            expiry=expiry,
+            option_series=option_series,
+            token=token,
+        )
     if token and token in option_series:
         series = option_series[token]
         # Candle ts is usually minute start; pick the bar covering ``when``.
@@ -497,12 +628,22 @@ def _premium_path(
     return _bs_premium(spot, strike, side, when, expiry), "bs"
 
 
-def _fake_inst(side: str, strike: Decimal, lot: int, token: str = "", tsym: str = "") -> Instrument:
+def _fake_inst(
+    side: str,
+    strike: Decimal,
+    lot: int,
+    *,
+    underlying: str = "NIFTY",
+    exchange: str = "NFO",
+    token: str = "",
+    tsym: str = "",
+) -> Instrument:
+    ul = underlying.upper()
     return Instrument(
-        exchange="NFO",
+        exchange=exchange,
         token=token or f"SIM-{side}-{strike}",
-        tsym=tsym or f"NIFTY{strike}{side}",
-        underlying="NIFTY",
+        tsym=tsym or f"{ul}{strike}{side}",
+        underlying=ul,
         expiry_date=None,
         strike=strike,
         option_type=side,
@@ -593,22 +734,34 @@ def _find_inst(universe: ContractUniverse, side: str, strike: Decimal) -> Instru
 async def run_backtest(
     day: date | None = None,
     *,
+    underlying: str = "NIFTY",
     exit_interval: int | None = None,
     scan_interval: int | None = None,
     from_snap: bool = False,
     refresh_snap: bool = False,
     snap_only: bool = False,
-) -> None:
+    capital_pool: dict[str, Decimal] | None = None,
+    honest_replay: bool = True,
+) -> dict[str, Any] | None:
     day = day or datetime.now(tz=IST).date()
     config = get_config()
+    ul = underlying.upper()
+    from algomcx.symbols_util import (
+        apply_active_underlying,
+        capital_for,
+        total_account_capital,
+        uses_pooled_capital,
+    )
+
+    apply_active_underlying(config, ul)
     broker: FlattradeAdapter | None = None
     broker_connected = False
 
-    snap = None if refresh_snap else load_day_snap(day)
+    snap = None if refresh_snap else load_day_snap(day, ul)
     if from_snap:
         if not snap:
-            print(f"ERROR: --from-snap but no snap at {_snap_dir(day)}")
-            return
+            print(f"ERROR: --from-snap but no snap at {_snap_dir(day, ul)}")
+            return None
         use_snap = True
     elif refresh_snap or snap is None:
         use_snap = False
@@ -631,7 +784,7 @@ async def run_backtest(
         m5_all = all_candles[CandleInterval.M5]
         if len(m1_all) < 30:
             print(f"ERROR: snap has too few 1m candles for {day} — aborting")
-            return
+            return None
     else:
         print("==> Ensuring Flattrade session...")
         await ensure_session(EnvSettings())
@@ -639,7 +792,16 @@ async def run_backtest(
         await broker.connect()
         broker_connected = True
 
-        print(f"==> Fetching NIFTY candles for {day.isoformat()} (day snap)...")
+        from algomcx.symbols_util import resolve_all_spot_tokens
+
+        await resolve_all_spot_tokens(config, broker)
+
+        fut_tsym = config.symbols.get("fut_tsym", "")
+        print(
+            f"==> Fetching {ul} FUT candles for {day.isoformat()} "
+            f"({config.symbols.get('exchange_spot')} token={config.symbols.get('spot_token')} "
+            f"{fut_tsym})..."
+        )
         all_candles = await _fetch_session_candles(broker, config, day)
         m1_all = all_candles[CandleInterval.M1]
         m3_all = all_candles[CandleInterval.M3]
@@ -647,7 +809,7 @@ async def run_backtest(
         if len(m1_all) < 30:
             print(f"ERROR: not enough 1m candles for {day} — aborting")
             await broker.disconnect()
-            return
+            return None
 
         open_spot = m1_all[0].close
         close_spot = m1_all[-1].close
@@ -657,7 +819,21 @@ async def run_backtest(
         print("==> Building contract universe (weekly ATM band)...")
         selector = ContractSelector(config, broker)
         mid_spot = m1_all[len(m1_all) // 2].close
-        universe = await selector.build_universe(mid_spot)
+        universe = await selector.build_universe(mid_spot, as_of=day)
+        if not universe.instruments:
+            cal = next_weekly_expiry_dates(
+                underlying=ul, as_of=day, count=1, include_today_if_expiry=True
+            )
+            primary_exp = format_expiry_tag(cal[0]) if cal else None
+            prior_uni = _prior_snap_universe(day, ul)
+            if prior_uni and (
+                primary_exp is None or prior_uni.expiry_symbol == primary_exp
+            ):
+                universe = selector.retarget_atm(prior_uni, mid_spot)
+                print(
+                    f"  Reused prior snap universe expiry={universe.expiry_symbol} "
+                    f"instruments={len(universe.instruments)} (expired series)"
+                )
         print(
             f"  expiry={universe.expiry_symbol} atm={universe.atm_strike} "
             f"instruments={len(universe.instruments)}"
@@ -696,6 +872,7 @@ async def run_backtest(
 
         save_day_snap(
             day,
+            underlying=ul,
             all_candles=all_candles,
             prior_day=prior_day,
             prior_m5=prior_m5,
@@ -705,7 +882,7 @@ async def run_backtest(
         if snap_only:
             print("==> --snap-only: fetch complete, skipping replay.")
             await broker.disconnect()
-            return
+            return None
 
     open_spot = m1_all[0].close
     close_spot = m1_all[-1].close
@@ -763,7 +940,7 @@ async def run_backtest(
     entry_start = time.fromisoformat(str(config.validator.get("entry_start_time", "10:00")))
     entry_end = time.fromisoformat(str(config.validator.get("entry_end_time", "15:15")))
     force_exit_t = time.fromisoformat(str(config.risk.get("force_exit_time", "15:15")))
-    max_concurrent = int(config.risk.get("max_concurrent_positions", 0))
+    max_concurrent = int(config.risk.get("max_concurrent_positions_per_index", 0))
     max_daily_loss = Decimal(str(config.risk.get("max_daily_loss", 0)))
     max_consec = int(config.risk.get("max_consecutive_losses", 0))
     max_trades_day = int(config.risk.get("max_trades_per_day", 0))
@@ -784,10 +961,22 @@ async def run_backtest(
     )
     exit_sec = max(1, min(exit_sec, scan_sec))
 
-    starting = Decimal(str(config.risk.get("account_capital_inr", 50000)))
-    available = starting
-    deployed = Decimal("0")
-    realized = Decimal("0")
+    if capital_pool is not None:
+        starting = capital_pool["starting"]
+        available = capital_pool["available"]
+        deployed = capital_pool["deployed"]
+        realized = capital_pool["realized"]
+    elif uses_pooled_capital(config):
+        starting = total_account_capital(config)
+        available = starting
+        deployed = Decimal("0")
+        realized = Decimal("0")
+    else:
+        starting = capital_for(config, ul)
+        available = starting
+        deployed = Decimal("0")
+        realized = Decimal("0")
+    pool_start_equity = starting + realized
     peak_deployed = Decimal("0")
     peak_util_pct = Decimal("0")
 
@@ -811,11 +1000,13 @@ async def run_backtest(
         lot_size = universe.atm_ce.lot_size
 
     print(
-        "\n==> Replaying session "
+        f"\n==> Replaying {ul} session "
         "(LIVE-PARITY layers · exit_rules · RuleValidator · §9 quality · library)..."
     )
     print(
-        f"  capital=₹{starting}  deploy_cap={config.risk.get('max_deployed_pct_of_equity')}%  "
+        f"  capital=₹{starting}"
+        + (" (shared pool)" if capital_pool is not None or uses_pooled_capital(config) else "")
+        + f"  deploy_cap={config.risk.get('max_deployed_pct_of_equity')}%  "
         f"per_trade_cap={config.risk.get('max_premium_pct_of_available')}%  "
         f"window={entry_start.strftime('%H:%M')}–{entry_end.strftime('%H:%M')} IST  "
         f"force_exit={force_exit_t.strftime('%H:%M')}  "
@@ -825,8 +1016,32 @@ async def run_backtest(
         f"max_trades/day={max_trades_day or '∞'}  "
         f"daily_loss_cap=₹{max_daily_loss}  consec_loss_cap={max_consec or '∞'}  "
         f"cooldown={cooldown_min}m global  "
-        f"data={'snap' if use_snap else 'live-fetch→snap'}"
+        f"data={'snap' if use_snap else 'live-fetch→snap'}  "
+        f"replay={'honest (no future bar peek)' if honest_replay else 'intra-bar synthetic'}"
     )
+
+    def _mark_premium(
+        *,
+        when: datetime,
+        spot: Decimal,
+        side: str,
+        strike: Decimal,
+        token: str | None,
+        bar_frac: Decimal,
+        bar: Candle,
+    ) -> tuple[Decimal, str]:
+        return _premium_path(
+            when=when,
+            spot=spot,
+            side=side,
+            strike=strike,
+            expiry=expiry_d,
+            option_series=option_series,
+            token=token,
+            bar_frac=bar_frac,
+            bar=bar,
+            honest=honest_replay,
+        )
 
     def _band_opt_states(
         uni: ContractUniverse,
@@ -834,21 +1049,21 @@ async def run_backtest(
         when: datetime,
         spot: Decimal,
         bar_frac: Decimal,
+        bar: Candle,
     ) -> dict[str, OptionState | None]:
         states: dict[str, OptionState | None] = {}
         for side in ("CE", "PE"):
             for inst in atm_band_instruments(
                 uni, side, band_steps=strike_band, step=step
             ):
-                prem, _ = _premium_path(
+                prem, _ = _mark_premium(
                     when=when,
                     spot=spot,
                     side=inst.option_type,
                     strike=inst.strike,
-                    expiry=expiry_d,
-                    option_series=option_series,
                     token=inst.token,
                     bar_frac=bar_frac,
+                    bar=bar,
                 )
                 vol = None
                 oi = None
@@ -892,6 +1107,8 @@ async def run_backtest(
         ts_ist: datetime,
         equity: Decimal,
         bypass_cooldown: bool = False,
+        strike_pick: dict | None = None,
+        bar: Candle | None = None,
     ) -> bool:
         nonlocal available, deployed
         if max_trades_day > 0 and (len(stats.closed) + len(open_trades)) >= max_trades_day:
@@ -928,15 +1145,14 @@ async def run_backtest(
             stats.skips["max_concurrent"] = stats.skips.get("max_concurrent", 0) + 1
             return False
 
-        prem, src = _premium_path(
+        prem, src = _mark_premium(
             when=when,
             spot=spot,
             side=side,
             strike=strike,
-            expiry=expiry_d,
-            option_series=option_series,
             token=inst.token if inst else None,
             bar_frac=bar_frac,
+            bar=bar or m1_all[0],
         )
         ls = inst.lot_size if inst else lot_size
         lots, premium_cost = _fit_lots(
@@ -947,6 +1163,7 @@ async def run_backtest(
             available=available,
             deployed=deployed,
             equity=equity,
+            strike_pick=strike_pick,
         )
         if lots < 1:
             stats.skips["capital_or_deploy_cap"] = stats.skips.get(
@@ -974,18 +1191,36 @@ async def run_backtest(
         )
         stats.entries += 1
         util_now = deployed / equity * Decimal("100") if equity > 0 else Decimal("0")
+        target = lots_for_confidence(
+            config.risk,
+            conf,
+            entry_ltp=prem,
+            lot_size=ls,
+            available=available,
+            deployed=deployed,
+            equity=equity,
+        )
+        pool_equity = starting + realized
         print(
             f"  ENTRY {ts_ist.strftime('%H:%M:%S')} {strategy} {side} "
-            f"@ {strike} prem={prem} lots={lots}/{lots_for_confidence(config.risk, conf)} "
+            f"@ {strike} prem={prem} lots={lots}/{target} "
             f"(conf={conf}) open={len(open_trades)} "
-            f"deployed=₹{deployed:.0f} ({util_now:.0f}%) avail=₹{available:.0f}"
+            f"pool=₹{pool_equity:.0f} deployed=₹{deployed:.0f} ({util_now:.0f}%) "
+            f"avail=₹{available:.0f}"
         )
         return True
 
     total_ticks = 0
     total_entry_scans = 0
     for i, bar in enumerate(m1_all):
-        waypoints = _live_parity_waypoints(bar, exit_sec=exit_sec, scan_sec=scan_sec)
+        prior_m1 = _slice_before(m1_all, bar.ts)
+        waypoints = _live_parity_waypoints(
+            bar,
+            exit_sec=exit_sec,
+            scan_sec=scan_sec,
+            prior_m1=prior_m1,
+            honest=honest_replay,
+        )
 
         for wp_i, (ts, spot, allow_entry) in enumerate(waypoints):
             total_ticks += 1
@@ -995,17 +1230,26 @@ async def run_backtest(
             is_last_scan = i == len(m1_all) - 1 and wp_i == len(waypoints) - 1
 
             m1_closed = _slice_before(m1_all, bar.ts)
-            m1 = m1_closed + [_forming_m1(bar, ts, spot)]
-            m3 = _slice_upto(m3_all, ts)
-            m5 = _slice_upto(m5_all, ts)
+            m1 = m1_closed + [_forming_m1(bar, ts, spot, honest=honest_replay)]
+            if honest_replay:
+                m3 = _slice_closed_period(m3_all, ts, 3)
+                m5 = _slice_closed_period(m5_all, ts, 5)
+            else:
+                m3 = _slice_upto(m3_all, ts)
+                m5 = _slice_upto(m5_all, ts)
             md._candles[CandleInterval.M1] = m1  # type: ignore[attr-defined]
             md._candles[CandleInterval.M3] = m3  # type: ignore[attr-defined]
             md._candles[CandleInterval.M5] = m5  # type: ignore[attr-defined]
             md._spot_ltp = spot  # type: ignore[attr-defined]
 
             atm = _round_strike(spot, step)
-            ce = _find_inst(universe, "CE", atm) or _fake_inst("CE", atm, lot_size)
-            pe = _find_inst(universe, "PE", atm) or _fake_inst("PE", atm, lot_size)
+            opt_ex = str(config.symbols.get("exchange_options", "NFO"))
+            ce = _find_inst(universe, "CE", atm) or _fake_inst(
+                "CE", atm, lot_size, underlying=ul, exchange=opt_ex
+            )
+            pe = _find_inst(universe, "PE", atm) or _fake_inst(
+                "PE", atm, lot_size, underlying=ul, exchange=opt_ex
+            )
             uni = ContractUniverse(
                 spot=spot,
                 atm_strike=atm,
@@ -1014,7 +1258,9 @@ async def run_backtest(
                 atm_ce=ce,
                 atm_pe=pe,
             )
-            band_states = _band_opt_states(uni, when=ts, spot=spot, bar_frac=bar_frac)
+            band_states = _band_opt_states(
+                uni, when=ts, spot=spot, bar_frac=bar_frac, bar=bar
+            )
             chain = build_chain_snapshot(uni, band_states, prior_oi=prior_oi)
             features_eng.set_chain_snapshot(chain)
             for tok, st in band_states.items():
@@ -1061,15 +1307,14 @@ async def run_backtest(
 
             still_open: list[OpenTrade] = []
             for ot in open_trades:
-                prem, src = _premium_path(
+                prem, src = _mark_premium(
                     when=ts,
                     spot=spot,
                     side=ot.side,
                     strike=ot.strike,
-                    expiry=expiry_d,
-                    option_series=option_series,
                     token=ot.token or None,
                     bar_frac=bar_frac,
+                    bar=bar,
                 )
                 ot.mfe = max(ot.mfe, prem - ot.entry_premium)
                 should, reason = _exit_decision(
@@ -1132,11 +1377,12 @@ async def run_backtest(
                             }
                         )
                     # Live does not force an extra entry scan on the exit quote.
+                    pool_equity = starting + realized
                     print(
                         f"  EXIT  {ts_ist.strftime('%H:%M:%S')} {ot.strategy} {ot.side} "
                         f"{ot.strike} lots={ot.lots} P&L=₹{pnl.quantize(Decimal('0.01'))} "
                         f"reason={reason}  open={len(open_trades)-1} "
-                        f"deployed=₹{deployed:.0f}"
+                        f"pool=₹{pool_equity:.0f} avail=₹{available:.0f} deployed=₹{deployed:.0f}"
                     )
                 else:
                     still_open.append(ot)
@@ -1223,6 +1469,8 @@ async def run_backtest(
                     ts_ist=ts_ist,
                     equity=equity,
                     bypass_cooldown=True,
+                    strike_pick=pick,
+                    bar=bar,
                 )
 
             if not allow_entry and not flips:
@@ -1256,15 +1504,14 @@ async def run_backtest(
                 )
             opt_st = band_states.get(inst.token) if inst else None
             if opt_st is None and inst is not None:
-                prem0, _ = _premium_path(
+                prem0, _ = _mark_premium(
                     when=ts,
                     spot=spot,
                     side=side,
                     strike=strike,
-                    expiry=expiry_d,
-                    option_series=option_series,
                     token=inst.token,
                     bar_frac=bar_frac,
+                    bar=bar,
                 )
                 opt_st = OptionState(
                     instrument_token=inst.token,
@@ -1309,6 +1556,8 @@ async def run_backtest(
                 bar_frac=bar_frac,
                 ts_ist=ts_ist,
                 equity=equity,
+                strike_pick=pick,
+                bar=bar,
             )
 
     print(
@@ -1317,11 +1566,10 @@ async def run_backtest(
         f"1m bars: {len(m1_all)}"
     )
 
-    if broker_connected and broker is not None:
-        await broker.disconnect()
-
     # Persist machine-readable export for reports
-    export_path = ROOT / "reports" / f"backtest_{m1_all[0].ts.astimezone(IST).date()}.json"
+    export_path = (
+        ROOT / "reports" / f"backtest_{m1_all[0].ts.astimezone(IST).date()}_{ul}.json"
+    )
     export_path.parent.mkdir(parents=True, exist_ok=True)
     import json
 
@@ -1341,12 +1589,13 @@ async def run_backtest(
             "max_premium_pct_of_available": config.risk.get("max_premium_pct_of_available"),
             "max_daily_loss": config.risk.get("max_daily_loss"),
             "confidence_lot_sizing": config.risk.get("confidence_lot_sizing"),
-            "exits": "trend_reversal (+ CE↔PE flip) → adverse → momentum_trail",
+            "exits": "5% SL · progressive trail from 1.5% MFE · no time-stop when green",
             "strike_selection": "ATM±1 via BS delta/gamma",
             "flip_on_trend_reversal": flip_on_reversal,
             "exit_tick_seconds": exit_sec,
             "entry_scan_seconds": scan_sec,
             "cadence": "live_parity",
+            "honest_replay": honest_replay,
         },
         "signals_seen": stats.signals_seen,
         "entries_filled": stats.entries,
@@ -1386,11 +1635,23 @@ async def run_backtest(
     print(f"\nJSON export: {export_path}")
 
     # Human-readable Markdown report
-    md_path = ROOT / "reports" / f"backtest_{m1_all[0].ts.astimezone(IST).date()}.md"
+    md_path = ROOT / "reports" / f"backtest_{m1_all[0].ts.astimezone(IST).date()}_{ul}.md"
     wins = [t for t in stats.closed if t.pnl > 0]
     losses = [t for t in stats.closed if t.pnl <= 0]
+    session_pnl = sum((t.pnl for t in stats.closed), Decimal("0"))
+    pool_end_equity = starting + realized
+    cap_label = (
+        f"| Pool equity | ₹{pool_start_equity:.0f} → ₹{pool_end_equity:.2f} |"
+        if capital_pool is not None
+        else f"| Capital | ₹{starting:.0f} → ₹{pool_end_equity:.2f} |"
+    )
+    pnl_label = (
+        f"| **Session P&L** | **₹{session_pnl:.2f}** |"
+        if capital_pool is not None
+        else f"| **Net P&L** | **₹{session_pnl:.2f}** |"
+    )
     lines = [
-        f"# Algo-MCX Day Backtest Report — {payload['date']}",
+        f"# Algo-MCX Day Backtest Report — {payload['date']} ({ul})",
         "",
         "## Session overview",
         "",
@@ -1398,8 +1659,8 @@ async def run_backtest(
         f"|---|---|",
         f"| Spot | {open_spot} → {close_spot} (Δ {close_spot - open_spot}) |",
         f"| Session VWAP | {payload['session_vwap']:.2f} |" if payload["session_vwap"] else "| Session VWAP | n/a |",
-        f"| Capital | ₹{starting:.0f} → ₹{starting + realized:.2f} |",
-        f"| **Net P&L** | **₹{realized:.2f}** |",
+        cap_label,
+        pnl_label,
         f"| Trades | {len(stats.closed)} ({len(wins)} wins / {len(losses)} losses) |",
         f"| Win rate | {len(wins)/len(stats.closed)*100:.1f}% |" if stats.closed else "| Win rate | n/a |",
         f"| Peak deployed | ₹{peak_deployed:.0f} ({peak_util_pct:.1f}% of equity) |",
@@ -1410,8 +1671,10 @@ async def run_backtest(
         "- Confidence-based lots (70→1, 80→2, 90→3), fill toward deploy room",
         "- Multiple concurrent positions (different strike/side)",
         "- Max ~85% equity deployed; per-trade premium ≤65% of available",
-        "- Exit priority: **trend reversal (VWAP bias flip)** → adverse 12% → momentum trail",
-        "- On `trend_reversal`, **flip CE↔PE** immediately (same tick)",
+        "- **5% max stop** on losers; early cut if never +2% green",
+        "- **Progressive trailing** from +1.5% MFE (tighter lock-in as profit grows)",
+        "- **No time exit while in profit** — winners run on trailing SL",
+        "- Trend reversal (VWAP bias flip) still exits immediately",
         "- Strike pick among **ATM / ATM±1** via Black-Scholes delta/gamma + spread",
         "- **Live-parity cadence**: exit ticks ~2s (quote pace); entry scans every scan_interval + post-exit",
         "- Spot/premium path visits OHLC extremes (tick-like adverse/trail)",
@@ -1450,7 +1713,7 @@ async def run_backtest(
     for row in payload["trades"]:
         cum += Decimal(str(row["pnl"]))
         lines.append(
-            f"| #{row['n']} {row['strategy']} {row['side']} | ₹{float(cum):+.2f} | ₹{float(starting + cum):.2f} |"
+            f"| #{row['n']} {row['strategy']} {row['side']} | ₹{float(cum):+.2f} | ₹{float(pool_start_equity + cum):.2f} |"
         )
     lines += [
         "",
@@ -1468,14 +1731,15 @@ async def run_backtest(
     print(f"Markdown report: {md_path}")
 
     print("\n" + "=" * 64)
-    print("TODAY BACKTEST — live-parity exits · multi-pos · flip · ATM±1")
+    print(f"TODAY BACKTEST — {ul} · futures · live-parity exits · flip · ATM±1")
     print("=" * 64)
     print(f"Date (IST): {m1_all[0].ts.astimezone(IST).date()}")
+    print(f"Underlying: {ul}  capital=₹{starting}")
     print(f"Spot: {open_spot} → {close_spot}  Δ={close_spot - open_spot}")
     print(f"1m bars: {len(m1_all)}  | 3m: {len(m3_all)}  | 5m: {len(m5_all)}")
     print(f"Signals seen: {stats.signals_seen}  | Entries filled: {stats.entries}")
     print(f"Session VWAP (full day): {vwap_final}")
-    print(f"Capital start: ₹{starting}  | End equity: ₹{(starting + realized):.2f}")
+    print(f"Pool equity start: ₹{pool_start_equity:.0f}  | End: ₹{pool_end_equity:.2f}  session P&L: ₹{session_pnl:.2f}")
     print(
         f"Peak deployed: ₹{peak_deployed:.0f}  "
         f"({peak_util_pct:.1f}% of equity)  target≈85%"
@@ -1513,6 +1777,425 @@ async def run_backtest(
     )
     print("=" * 64)
 
+    if broker_connected and broker is not None:
+        await broker.disconnect()
+
+    if capital_pool is not None:
+        capital_pool["realized"] = realized
+        end_equity = capital_pool["starting"] + realized
+        capital_pool["opening_equity"] = end_equity
+        capital_pool["available"] = end_equity
+        capital_pool["deployed"] = Decimal("0")
+
+    return {
+        "underlying": ul,
+        "date": str(m1_all[0].ts.astimezone(IST).date()),
+        "starting": starting,
+        "pnl": total,
+        "trades": len(stats.closed),
+        "wins": len(wins),
+        "losses": len(losses),
+        "entries": stats.entries,
+        "signals_seen": stats.signals_seen,
+        "open_spot": open_spot,
+        "close_spot": close_spot,
+        "closed": stats.closed,
+        "skips": dict(stats.skips),
+    }
+
+
+async def run_week_backtest(
+    *,
+    week_monday: date | None = None,
+    underlying: str = "NIFTY",
+    from_snap: bool = False,
+    refresh_snap: bool = False,
+    exit_interval: int | None = None,
+    scan_interval: int | None = None,
+    honest_replay: bool = True,
+    initial_capital: Decimal | None = None,
+) -> dict[str, Any]:
+    """Mon–Fri backtest with compounded capital (P&L carries day to day)."""
+    from algomcx.symbols_util import total_account_capital, uses_pooled_capital
+
+    config = get_config()
+    ul = underlying.upper()
+    today = datetime.now(tz=IST).date()
+    if week_monday is None:
+        # Last complete Mon–Fri week (if today is Sat/Sun, that's the week just ended).
+        dow = today.weekday()  # Mon=0
+        if dow >= 5:
+            friday = today - timedelta(days=dow - 4)
+        else:
+            friday = today - timedelta(days=dow + 3)
+        week_monday = friday - timedelta(days=4)
+    else:
+        friday = week_monday + timedelta(days=4)
+
+    days = [week_monday + timedelta(days=i) for i in range(5)]
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+
+    initial = initial_capital
+    if initial is None:
+        initial = total_account_capital(config) if uses_pooled_capital(config) else Decimal(
+            str(config.risk.get("account_capital_inr", 50000))
+        )
+    capital_pool: dict[str, Decimal] = {
+        "starting": initial,
+        "available": initial,
+        "deployed": Decimal("0"),
+        "realized": Decimal("0"),
+    }
+
+    print("\n" + "=" * 72)
+    print(f"WEEKLY BACKTEST — {ul} · {days[0]} → {days[-1]} · carry-forward capital")
+    print(f"Opening equity: ₹{initial}")
+    print("Expiry note: NIFTY weekly = Tuesday — Mon/Tue use expiring series; Wed+ rolls next week")
+    print(
+        f"Replay mode: {'HONEST (no future bar/VWAP peek)' if honest_replay else 'synthetic intra-bar'}"
+    )
+    print("=" * 72)
+
+    daily_results: list[dict[str, Any]] = []
+    missing: list[date] = []
+
+    for label, day in zip(day_names, days):
+        print(f"\n{'#' * 72}\n#  {label} {day.isoformat()}\n{'#' * 72}")
+        open_eq = capital_pool["starting"] + capital_pool["realized"]
+        capital_pool["available"] = open_eq
+        capital_pool["deployed"] = Decimal("0")
+        print(f"  >>> Session open equity: ₹{open_eq:.2f}")
+
+        snap = None if refresh_snap else load_day_snap(day, ul)
+        if from_snap and snap is None:
+            print(f"  WARN: no snap for {day} — skipping (fetch with refresh-snap)")
+            missing.append(day)
+            continue
+
+        out = await run_backtest(
+            day,
+            underlying=ul,
+            exit_interval=exit_interval,
+            scan_interval=scan_interval,
+            from_snap=from_snap,
+            refresh_snap=refresh_snap,
+            capital_pool=capital_pool,
+            honest_replay=honest_replay,
+        )
+        if not out:
+            missing.append(day)
+            continue
+
+        end_eq = float(open_eq) + float(out["pnl"])
+        day_pnl = out["pnl"]
+        snap_meta = snap.get("meta", {}) if snap else {}
+        expiry_sym = snap_meta.get("expiry_symbol") if snap_meta else "?"
+        if not expiry_sym or expiry_sym == "?":
+            loaded = load_day_snap(day, ul)
+            if loaded:
+                expiry_sym = loaded.get("meta", {}).get("expiry_symbol", "?")
+
+        daily_results.append(
+            {
+                "underlying": out["underlying"],
+                "date": out["date"],
+                "weekday": label,
+                "open_equity": float(open_eq),
+                "close_equity": end_eq,
+                "day_pnl": float(day_pnl),
+                "pnl": float(out["pnl"]),
+                "trades": out["trades"],
+                "wins": out["wins"],
+                "losses": out["losses"],
+                "entries": out["entries"],
+                "signals_seen": out["signals_seen"],
+                "open_spot": float(out["open_spot"]),
+                "close_spot": float(out["close_spot"]),
+                "expiry_symbol": expiry_sym,
+            }
+        )
+
+        # Compound: next day starts from today's closing equity.
+        capital_pool["starting"] = Decimal(str(end_eq))
+        capital_pool["realized"] = Decimal("0")
+        capital_pool["available"] = Decimal(str(end_eq))
+        capital_pool["deployed"] = Decimal("0")
+        print(f"  >>> Session close equity: ₹{end_eq:.2f}  (day P&L ₹{float(day_pnl):.2f})")
+
+    final_equity = capital_pool["starting"]
+    total_pnl = final_equity - initial
+    total_trades = sum(r["trades"] for r in daily_results)
+    total_wins = sum(r["wins"] for r in daily_results)
+
+    def _json_num(v: Any) -> Any:
+        if isinstance(v, Decimal):
+            return float(v)
+        if isinstance(v, dict):
+            return {k: _json_num(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [_json_num(x) for x in v]
+        return v
+
+    week_payload = _json_num(
+        {
+        "underlying": ul,
+        "week_start": days[0].isoformat(),
+        "week_end": days[-1].isoformat(),
+        "capital_start": float(initial),
+        "capital_end": float(final_equity),
+        "total_pnl": float(total_pnl),
+        "return_pct": float(total_pnl / initial * 100) if initial else 0.0,
+        "total_trades": total_trades,
+        "total_wins": total_wins,
+        "days_run": len(daily_results),
+        "days_missing": [d.isoformat() for d in missing],
+        "daily": daily_results,
+        }
+    )
+
+    report_stem = f"backtest_week_{'honest_' if honest_replay else ''}{days[0]}_{days[-1]}_{ul}"
+    config_capital = total_account_capital(config) if uses_pooled_capital(config) else Decimal(
+        str(config.risk.get("account_capital_inr", 50000))
+    )
+    if initial != config_capital:
+        report_stem = f"backtest_week_{'honest_' if honest_replay else ''}{int(initial)}_{days[0]}_{days[-1]}_{ul}"
+    json_path = ROOT / "reports" / f"{report_stem}.json"
+    md_path = ROOT / "reports" / f"{report_stem}.md"
+    json_path.write_text(json.dumps(week_payload, indent=2))
+
+    md_lines = [
+        f"# Weekly Backtest — {ul} ({days[0]} → {days[-1]})",
+        "",
+        "## Summary",
+        "",
+        "| Metric | Value |",
+        "|---|---|",
+        f"| Starting capital (Mon) | ₹{initial:,.2f} |",
+        f"| Ending capital (Fri) | **₹{final_equity:,.2f}** |",
+        f"| **Week P&L** | **₹{total_pnl:+,.2f}** ({week_payload['return_pct']:+.1f}%) |",
+        f"| Trading days replayed | {len(daily_results)} / 5 |",
+        f"| Total trades | {total_trades} ({total_wins} wins) |",
+        "",
+        "## Daily carry-forward (compounded)",
+        "",
+        "| Day | Date | Expiry series | Open ₹ | Close ₹ | Day P&L | Trades | W/L |",
+        "|---|---|---|---:|---:|---:|---:|---|",
+    ]
+    for r in daily_results:
+        md_lines.append(
+            f"| {r['weekday']} | {r['date']} | {r.get('expiry_symbol', '?')} | "
+            f"₹{r['open_equity']:,.0f} | ₹{r['close_equity']:,.0f} | "
+            f"₹{r['day_pnl']:+,.2f} | {r['trades']} | {r['wins']}/{r['losses']} |"
+        )
+    if missing:
+        md_lines += ["", f"**Missing snaps:** {', '.join(d.isoformat() for d in missing)}"]
+    md_lines += [
+        "",
+        "_Capital compounds daily — each session opens with prior close equity._",
+        f"_Generated by `scripts/day_backtest.py --week` · `{json_path.name}`_",
+        "",
+    ]
+    md_path.write_text("\n".join(md_lines))
+
+    ledger_stem = f"ledger_week_{week_start}_{week_end}_{ul}"
+    if initial != config_capital:
+        ledger_stem = f"ledger_week_{int(initial)}_{week_start}_{week_end}_{ul}"
+    ledger_md, ledger_json = write_week_ledger(
+        week_start=days[0],
+        week_end=days[-1],
+        underlying=ul,
+        capital_start=initial,
+        stem=ledger_stem,
+    )
+
+    print("\n" + "=" * 72)
+    print("WEEKLY SUMMARY")
+    print("=" * 72)
+    for r in daily_results:
+        print(
+            f"  {r['weekday']} {r['date']}  exp={r.get('expiry_symbol','?')}  "
+            f"₹{r['open_equity']:,.0f} → ₹{r['close_equity']:,.0f}  "
+            f"P&L ₹{r['day_pnl']:+,.2f}  trades={r['trades']}"
+        )
+    print("-" * 72)
+    print(
+        f"  WEEK TOTAL  ₹{initial:,.0f} → ₹{final_equity:,.2f}  "
+        f"P&L ₹{total_pnl:+,.2f} ({week_payload['return_pct']:+.1f}%)  "
+        f"trades={total_trades}"
+    )
+    if missing:
+        print(f"  MISSING DAYS: {', '.join(d.isoformat() for d in missing)}")
+    print(f"\nJSON: {json_path}")
+    print(f"Markdown: {md_path}")
+    print(f"Ledger: {ledger_md}")
+    print(f"Ledger JSON: {ledger_json}")
+    print("=" * 72)
+
+    return week_payload
+
+
+def write_week_ledger(
+    *,
+    week_start: date,
+    week_end: date,
+    underlying: str,
+    capital_start: Decimal,
+    stem: str | None = None,
+) -> tuple[Path, Path]:
+    """Merge per-day backtest JSONs into one full trade ledger."""
+    ul = underlying.upper()
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+    days = [week_start + timedelta(days=i) for i in range(5)]
+    all_trades: list[dict[str, Any]] = []
+    for label, day in zip(day_names, days):
+        p = ROOT / "reports" / f"backtest_{day.isoformat()}_{ul}.json"
+        if not p.exists():
+            continue
+        j = json.loads(p.read_text())
+        for t in j.get("trades", []):
+            all_trades.append({**t, "date": day.isoformat(), "weekday": label})
+    all_trades.sort(key=lambda t: t["entry_ist"])
+
+    capital = float(capital_start)
+    rows: list[dict[str, Any]] = []
+    for i, t in enumerate(all_trades, 1):
+        capital += float(t["pnl"])
+        rows.append({**t, "trade_num": i, "running_equity": round(capital, 2)})
+
+    stem = stem or f"ledger_week_{week_start}_{week_end}_{ul}"
+    json_path = ROOT / "reports" / f"{stem}.json"
+    md_path = ROOT / "reports" / f"{stem}.md"
+    json_path.write_text(
+        json.dumps(
+            {
+                "week_start": week_start.isoformat(),
+                "week_end": week_end.isoformat(),
+                "underlying": ul,
+                "capital_start": float(capital_start),
+                "capital_end": capital,
+                "total_trades": len(rows),
+                "trades": rows,
+            },
+            indent=2,
+        )
+    )
+
+    lines = [
+        f"# Weekly Trade Ledger — {ul} ({week_start} → {week_end})",
+        "",
+        "Full trade log: CE/PE, entry/exit premium & time, lots, spot, P&L, running equity.",
+        "",
+        f"**Starting capital:** ₹{float(capital_start):,.0f}  |  "
+        f"**Ending capital:** ₹{capital:,.2f}  |  **Trades:** {len(rows)}",
+        "",
+        "## Ledger table",
+        "",
+        "| # | Day | Date | Strategy | Side | Symbol | Strike | Lots | Qty | "
+        "Entry (IST) | Entry ₹ | Exit (IST) | Exit ₹ | Hold | Spot In→Out | P&L | Balance | Result | Exit |",
+        "|---:|---|---|---|---|---|---:|---:|---:|---|---:|---|---:|---:|---|---:|---:|---|---|",
+    ]
+    for r in rows:
+        entry_t = r["entry_ist"].split(" ", 1)[1]
+        exit_t = r["exit_ist"].split(" ", 1)[1]
+        lines.append(
+            f"| {r['trade_num']} | {r['weekday']} | {r['date']} | {r['strategy']} | {r['side']} | "
+            f"`{r['tsym']}` | {r['strike']:.0f} | {r['lots']} | {r['qty']} | {entry_t} | "
+            f"{r['entry_premium']:.2f} | {exit_t} | {r['exit_premium']:.2f} | "
+            f"{r['hold_minutes']:.1f}m | {r['entry_spot']:.0f}→{r['exit_spot']:.0f} | "
+            f"**{r['pnl']:+,.2f}** | ₹{r['running_equity']:,.0f} | {r['result']} | {r['exit_reason']} |"
+        )
+    lines += ["", "## Trade-by-trade detail", ""]
+    for r in rows:
+        lines += [
+            f"### #{r['trade_num']} — {r['result']} ₹{r['pnl']:+,.2f} ({r['weekday']} {r['date']})",
+            "",
+            "| Field | Value |",
+            "|---|---|",
+            f"| Strategy | `{r['strategy']}` |",
+            f"| Contract | **{r['side']}** {r['strike']:.0f} — `{r['tsym']}` |",
+            f"| Confidence | {r['confidence']} |",
+            f"| Size | {r['lots']} lot(s) × {r['lot_size']} = **{r['qty']} qty** |",
+            f"| Entry | **{r['entry_ist']} IST** @ premium **₹{r['entry_premium']:.2f}** "
+            f"(NIFTY spot {r['entry_spot']:.2f}) |",
+            f"| Exit | **{r['exit_ist']} IST** @ premium **₹{r['exit_premium']:.2f}** "
+            f"(NIFTY spot {r['exit_spot']:.2f}) |",
+            f"| Premium change | {r['premium_change_pct']:+.2f}% |",
+            f"| Hold | {r['hold_minutes']:.1f} min |",
+            f"| **P&L** | **₹{r['pnl']:+,.2f}** |",
+            f"| Running equity | ₹{r['running_equity']:,.2f} |",
+            f"| Exit reason | `{r['exit_reason']}` |",
+            "",
+        ]
+    lines += [
+        f"_Generated by `scripts/day_backtest.py --week` · `{json_path.name}`_",
+        "",
+    ]
+    md_path.write_text("\n".join(lines))
+    return md_path, json_path
+
+
+async def run_dual_backtest(
+    day: date | None = None,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    from algomcx.symbols_util import list_underlyings, total_account_capital, uses_pooled_capital
+
+    config = get_config()
+    symbols = [
+        str(row.get("symbol", "")).upper()
+        for row in list_underlyings(config)
+        if row.get("symbol")
+    ]
+    if not symbols:
+        symbols = ["NIFTY"]
+    capital_pool: dict[str, Decimal] | None = None
+    if uses_pooled_capital(config):
+        total = total_account_capital(config)
+        capital_pool = {
+            "starting": total,
+            "available": total,
+            "deployed": Decimal("0"),
+            "realized": Decimal("0"),
+        }
+        print(f"\n>>> Shared capital pool: ₹{total}")
+    results: list[dict[str, Any]] = []
+    for sym in symbols:
+        print("\n" + "#" * 72)
+        print(f"#  BACKTEST: {sym}")
+        print("#" * 72)
+        out = await run_backtest(
+            day, underlying=sym, capital_pool=capital_pool, **kwargs
+        )
+        if out:
+            results.append(out)
+    if len(results) > 1:
+        combined_pnl = sum((r["pnl"] for r in results), Decimal("0"))
+        combined_trades = sum(r["trades"] for r in results)
+        combined_wins = sum(r["wins"] for r in results)
+        print("\n" + "=" * 72)
+        print("COMBINED DUAL-INDEX BACKTEST")
+        print("=" * 72)
+        for r in results:
+            print(
+                f"  {r['underlying']:6s}  P&L ₹{r['pnl']:>10}  "
+                f"trades={r['trades']}  wins={r['wins']}  "
+                f"spot {r['open_spot']}→{r['close_spot']}"
+            )
+        print("-" * 72)
+        print(
+            f"  TOTAL   P&L ₹{combined_pnl:>10}  "
+            f"trades={combined_trades}  wins={combined_wins}"
+        )
+        if capital_pool is not None:
+            end_equity = capital_pool["starting"] + capital_pool["realized"]
+            print(
+                f"  POOL    end equity ₹{end_equity:.2f}  "
+                f"avail=₹{capital_pool['available']:.0f}  "
+                f"deployed=₹{capital_pool['deployed']:.0f}"
+            )
+        print("=" * 72)
+    return results
+
 
 if __name__ == "__main__":
     import argparse
@@ -1522,6 +2205,11 @@ if __name__ == "__main__":
         "--date",
         help="IST session date YYYY-MM-DD (default: today)",
         default=None,
+    )
+    parser.add_argument(
+        "--underlying",
+        help="Underlying symbol (default: NIFTY)",
+        default="NIFTY",
     )
     parser.add_argument(
         "--exit-interval",
@@ -1550,15 +2238,56 @@ if __name__ == "__main__":
         action="store_true",
         help="Fetch and save day snap, then exit without replaying",
     )
+    parser.add_argument(
+        "--week",
+        action="store_true",
+        help="Run Mon–Fri week backtest with capital carry-forward (last complete week)",
+    )
+    parser.add_argument(
+        "--week-start",
+        help="Monday of week to backtest YYYY-MM-DD (with --week)",
+        default=None,
+    )
+    parser.add_argument(
+        "--optimistic-intra-bar",
+        action="store_true",
+        help="Allow intra-bar VWAP/close path (can peek at future within 1m bar; not recommended)",
+    )
+    parser.add_argument(
+        "--capital",
+        type=float,
+        default=None,
+        help="Override starting capital for backtest (week mode compounds daily from this)",
+    )
     args = parser.parse_args()
     d = date.fromisoformat(args.date) if args.date else None
-    asyncio.run(
-        run_backtest(
-            d,
-            exit_interval=args.exit_interval,
-            scan_interval=args.scan_interval,
-            from_snap=args.from_snap,
-            refresh_snap=args.refresh_snap,
-            snap_only=args.snap_only,
-        )
+    honest_replay = not args.optimistic_intra_bar
+    capital_override = Decimal(str(args.capital)) if args.capital is not None else None
+    common = dict(
+        exit_interval=args.exit_interval,
+        scan_interval=args.scan_interval,
+        from_snap=args.from_snap,
+        refresh_snap=args.refresh_snap,
+        snap_only=args.snap_only,
+        honest_replay=honest_replay,
     )
+    if args.week:
+        week_mon = date.fromisoformat(args.week_start) if args.week_start else None
+        asyncio.run(
+            run_week_backtest(
+                week_monday=week_mon,
+                underlying=args.underlying.upper()
+                if str(args.underlying).upper() != "ALL"
+                else "NIFTY",
+                from_snap=args.from_snap,
+                refresh_snap=args.refresh_snap,
+                exit_interval=args.exit_interval,
+                scan_interval=args.scan_interval,
+                honest_replay=honest_replay,
+                initial_capital=capital_override,
+            )
+        )
+    elif str(args.underlying).upper() == "ALL":
+        asyncio.run(run_dual_backtest(d, **common))
+    else:
+        asyncio.run(run_backtest(d, underlying=args.underlying.upper(), **common))

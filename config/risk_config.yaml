@@ -1,26 +1,45 @@
 account_capital_inr: 50000
-# Each new entry may use up to this % of currently available capital.
-max_premium_pct_of_available: 65
+# Single shared capital pool for NIFTY paper/live trading.
+use_pooled_capital: true
+# Each new entry may use up to this % of currently available capital (at trade time).
+max_premium_pct_of_available: 90
 # Total deployed premium cap as % of equity (starting + realized P&L).
-max_deployed_pct_of_equity: 85
+max_deployed_pct_of_equity: 90
 default_lots: 1
 confidence_lot_sizing:
   enabled: true
-  max_lots: 2
-  tiers:
-    - min_confidence: 80
-      lots: 1
-    - min_confidence: 88
-      lots: 2
-    - min_confidence: 95
-      lots: 2
-# 0 = unlimited trade count (UI "20 closed" was display-only, not a trade cap).
+  # dynamic = confidence score scales capital %, then buy max affordable lots.
+  mode: dynamic
+  base_confidence: 76
+  max_confidence: 100
+  # At router minimum (76) deploy 30%; linear ramp to 90% by conf 90+.
+  min_capital_pct: 30
+  max_capital_pct: 90
+  # Confidence >= 90 → deploy 90% of available margin.
+  aggressive_deploy_min_confidence: 90
+  # 0 = no fixed lot cap — only capital, confidence, and greeks confirmation apply.
+  max_lots: 0
+# Scale deployable budget by latest delta/gamma/IV confirmation (no fixed lot caps).
+greeks_lot_sizing:
+  enabled: true
+  ideal_delta_min: 0.35
+  ideal_delta_max: 0.65
+  near_delta_min: 0.25
+  near_delta_max: 0.75
+  min_gamma_ok: 0.0004
+  min_gamma_strong: 0.001
+  max_iv: 0.85
+  min_multiplier: 0.55
+# 0 = unlimited closed trades per day (no engine cap on trade count).
 max_trades_per_day: 0
-max_concurrent_positions: 1
-# Pause new entries after this many consecutive losses (0 = disabled).
-max_consecutive_losses: 3
-# Soft daily loss brake in ₹ (0 = disabled). ~4% of capital.
-max_daily_loss: 2000
-force_exit_time: "23:00"
-cooldown_after_exit_minutes: 8
+max_concurrent_positions: 2
+# 0 = unlimited concurrent NIFTY positions; capital deploy limits still apply.
+max_concurrent_positions_per_index: 0
+# 0 = disabled — do not pause entries after N losses (quality gates handle filtering).
+max_consecutive_losses: 0
+# 0 = disabled — no daily ₹ brake on new entries (exits still run).
+max_daily_loss: 0
+force_exit_time: "15:15"
+# Minutes after any exit before next entry on same index (was 8 — too few trades/day).
+cooldown_after_exit_minutes: 2
 kill_switch_flatten: true

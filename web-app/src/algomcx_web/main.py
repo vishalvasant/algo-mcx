@@ -58,7 +58,7 @@ def _resolve_env_file() -> str | None:
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=_resolve_env_file(), extra="ignore")
-    database_url: str = "postgresql://algoflat:algoflat@localhost:5432/algoflat"
+    database_url: str = "postgresql://algomcx:algomcx@localhost:5432/algomcx"
     trading_engine_url: str = "http://127.0.0.1:8001"
 
 
@@ -79,7 +79,6 @@ User = Annotated[str, Depends(require_user)]
 async def startup() -> None:
     global _pool
     _pool = await asyncpg.create_pool(dsn=settings.database_url, min_size=1, max_size=5)
-    await ensure_paper_account(_pool)
 
 
 @app.on_event("shutdown")
@@ -144,7 +143,7 @@ async def proxy_health(_user: User) -> dict[str, Any]:
     try:
         row = await pool().fetchrow(
             """
-            SELECT kill_switch FROM daily_risk_state
+            SELECT BOOL_OR(kill_switch) AS kill_switch FROM daily_risk_state
             WHERE trade_date = (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')::date
             """
         )
@@ -163,6 +162,10 @@ async def market_summary(_user: User) -> dict[str, Any]:
         except Exception:
             data = {
                 "underlying": "GOLD",
+                "active_underlying": "GOLD",
+                "commodities": [
+                    {"underlying": "GOLD", "display_name": "Gold", "spot_ltp": None, "atm_strike": None},
+                ],
                 "spot_ltp": None,
                 "session_vwap": None,
                 "spot_vs_vwap": None,
@@ -171,19 +174,19 @@ async def market_summary(_user: User) -> dict[str, Any]:
                 "market_open": False,
             }
 
-    row = await pool().fetchrow(
-        f"""
-        SELECT
-            COALESCE(starting_capital, 50000) AS starting_capital,
-            COALESCE(available_capital, 50000) AS available_capital,
-            COALESCE(deployed_capital, 0) AS deployed_capital,
-            COALESCE(realized_pnl, 0) AS today_pnl,
-            COALESCE(trade_count, 0) AS trade_count
-        FROM daily_risk_state
-        WHERE trade_date = {IST_TRADE_DATE}
-        """
-    )
-    if row:
+        row = await pool().fetchrow(
+            f"""
+            SELECT
+                COALESCE(SUM(starting_capital), 50000) AS starting_capital,
+                COALESCE(SUM(available_capital), 50000) AS available_capital,
+                COALESCE(SUM(deployed_capital), 0) AS deployed_capital,
+                COALESCE(SUM(realized_pnl), 0) AS today_pnl,
+                COALESCE(SUM(trade_count), 0) AS trade_count
+            FROM daily_risk_state
+            WHERE trade_date = {IST_TRADE_DATE}
+            """
+        )
+    if row and data.get("trading_mode", "paper") == "paper":
         data["starting_capital"] = float(row["starting_capital"])
         data["available_capital"] = float(row["available_capital"])
         data["deployed_capital"] = float(row["deployed_capital"])
@@ -200,7 +203,13 @@ async def market_summary(_user: User) -> dict[str, Any]:
 
     # Equity = carried-forward starting + today realized + live unrealized.
     unrealized = float(data.get("unrealized_pnl") or 0)
-    data["equity"] = float(data["starting_capital"]) + float(data["today_pnl"]) + unrealized
+    if data.get("trading_mode") == "live" and data.get("equity") is not None:
+        data["equity"] = float(data["equity"])
+    else:
+        data["equity"] = float(data.get("starting_capital", 0)) + float(data.get("today_pnl", 0)) + unrealized
+
+    limits = data.get("trading_limits") or {}
+    data.setdefault("max_daily_loss", float(limits.get("max_daily_loss_inr", 0)))
 
     stats = await pool().fetchrow(
         f"""
@@ -546,6 +555,26 @@ async def refresh_universe(_user: User) -> dict[str, Any]:
         return resp.json()
 
 
+@app.post("/api/control/trading-mode")
+async def trading_mode(_user: User, mode: str) -> dict[str, Any]:
+    normalized = str(mode).lower()
+    if normalized not in ("paper", "live"):
+        raise HTTPException(status_code=400, detail="mode must be paper or live")
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post(
+            f"{settings.trading_engine_url}/control/trading-mode",
+            params={"mode": normalized},
+        )
+        if resp.status_code >= 400:
+            detail = resp.text
+            try:
+                detail = resp.json().get("detail", detail)
+            except Exception:
+                pass
+            raise HTTPException(status_code=resp.status_code, detail=detail)
+        return resp.json()
+
+
 @app.post("/api/control/auto-trade")
 async def auto_trade(_user: User, enabled: bool = True) -> dict[str, Any]:
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -577,11 +606,79 @@ async def sync_missing(_user: User) -> dict[str, Any]:
         return resp.json()
 
 
+@app.get("/api/settings/flattrade")
+async def get_flattrade_credentials(_user: User) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{settings.trading_engine_url}/control/flattrade/credentials",
+        )
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        return resp.json()
+
+
+@app.put("/api/settings/flattrade")
+async def put_flattrade_credentials(_user: User, body: dict[str, Any]) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.put(
+            f"{settings.trading_engine_url}/control/flattrade/credentials",
+            json=body,
+        )
+        if resp.status_code >= 400:
+            detail = resp.text
+            try:
+                detail = resp.json().get("detail", detail)
+            except Exception:
+                pass
+            raise HTTPException(status_code=resp.status_code, detail=detail)
+        return resp.json()
+
+
+@app.get("/api/control/telegram/status")
+async def telegram_status(_user: User) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(f"{settings.trading_engine_url}/control/telegram/status")
+        if resp.status_code >= 400:
+            raise HTTPException(status_code=resp.status_code, detail=resp.text)
+        return resp.json()
+
+
+@app.post("/api/control/telegram/link")
+async def telegram_link(_user: User) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(f"{settings.trading_engine_url}/control/telegram/link")
+        if resp.status_code >= 400:
+            detail = resp.text
+            try:
+                detail = resp.json().get("detail", detail)
+            except Exception:
+                pass
+            raise HTTPException(status_code=resp.status_code, detail=detail)
+        return resp.json()
+
+
+@app.post("/api/control/telegram/test")
+async def telegram_test(_user: User) -> dict[str, Any]:
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(f"{settings.trading_engine_url}/control/telegram/test")
+        if resp.status_code >= 400:
+            detail = resp.text
+            try:
+                detail = resp.json().get("detail", detail)
+            except Exception:
+                pass
+            raise HTTPException(status_code=resp.status_code, detail=detail)
+        return resp.json()
+
+
 @app.get("/api/decision-logs")
 async def decision_logs(
-    _user: User, limit: int = 100, event_type: str | None = None
+    _user: User,
+    limit: int = 25,
+    offset: int = 0,
+    event_type: str | None = None,
 ) -> dict[str, Any]:
-    params: dict[str, Any] = {"limit": limit}
+    params: dict[str, Any] = {"limit": limit, "offset": offset}
     if event_type:
         params["event_type"] = event_type
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -800,12 +897,46 @@ async def watchlist(_user: User) -> dict[str, Any]:
         except Exception:
             return {
                 "underlying": "GOLD",
+                "active_underlying": "GOLD",
+                "commodities": [],
                 "spot_ltp": None,
                 "atm_strike": None,
                 "instrument_count": 0,
                 "last_quote_ts": None,
                 "items": [],
             }
+
+
+@app.get("/api/chart/candles")
+async def chart_candles(
+    _user: User,
+    underlying: str = "GOLD",
+    interval: str = "15m",
+    days: int = 30,
+    token: str | None = None,
+    exchange: str | None = None,
+    tsym: str | None = None,
+) -> dict[str, Any]:
+    params: dict[str, str | int] = {
+        "underlying": underlying,
+        "interval": interval,
+        "days": days,
+    }
+    if token:
+        params["token"] = token
+    if exchange:
+        params["exchange"] = exchange
+    if tsym:
+        params["tsym"] = tsym
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            resp = await client.get(
+                f"{settings.trading_engine_url}/chart/candles",
+                params=params,
+            )
+            return resp.json()
+        except Exception:
+            return {"underlying": underlying.upper(), "interval": interval, "bars": []}
 
 
 @app.get("/api/quotes/stream")

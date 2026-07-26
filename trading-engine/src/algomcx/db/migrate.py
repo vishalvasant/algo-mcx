@@ -24,6 +24,43 @@ def _migrations_dir() -> Path:
     return candidates[0]
 
 
+async def _seed_preapplied_migrations(conn) -> None:
+    """Mark migrations already applied by postgres initdb (same files mounted in compose)."""
+    has_capital = await conn.fetchval(
+        """
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public'
+          AND table_name = 'daily_risk_state'
+          AND column_name = 'starting_capital'
+        """
+    )
+    if has_capital:
+        await conn.execute(
+            """
+            INSERT INTO schema_migrations (filename)
+            VALUES ('002_paper_account.sql')
+            ON CONFLICT (filename) DO NOTHING
+            """
+        )
+
+    has_underlying_key = await conn.fetchval(
+        """
+        SELECT 1 FROM pg_constraint c
+        JOIN pg_class t ON c.conrelid = t.oid
+        WHERE t.relname = 'daily_risk_state'
+          AND c.conname = 'daily_risk_state_trade_date_underlying_key'
+        """
+    )
+    if has_underlying_key:
+        await conn.execute(
+            """
+            INSERT INTO schema_migrations (filename)
+            VALUES ('003_per_underlying_risk.sql')
+            ON CONFLICT (filename) DO NOTHING
+            """
+        )
+
+
 async def apply_migrations() -> None:
     migrations_dir = _migrations_dir()
     if not migrations_dir.is_dir():
@@ -54,6 +91,8 @@ async def apply_migrations() -> None:
                 ON CONFLICT (filename) DO NOTHING
                 """
             )
+
+        await _seed_preapplied_migrations(conn)
 
         for path in sorted(migrations_dir.glob("*.sql")):
             applied = await conn.fetchval(

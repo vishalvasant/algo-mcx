@@ -1,9 +1,9 @@
 active_scanner: router
-strategy_version: strategy_router_v2.2.0_mtf_wait_early_exit
+strategy_version: strategy_router_v2.3.0_counter_bias_fade
 
 # Rule-based router (no LLM). Pick one strategy or NO_TRADE.
 router:
-  min_confidence: 80
+  min_confidence: 76
   log_every_decision: true
   # High-quality core — wait for confirmation; weak aliases disabled.
   enabled_strategies:
@@ -17,6 +17,21 @@ router:
     - gap_and_go
     - pdh_pdl_break
     - expiry_scalping
+    - peak_reversal_fade
+
+# Fade extended moves against 5m bias using 5m + 15m reversal structure.
+counter_bias:
+  enabled: true
+  min_extension_points: 20
+  min_reversal_signals: 2
+  min_counter_mtf_score: 48
+  require_1m_turn: true
+  # When bias-side MTF confidence lags counter-side (CE weak in bull, etc.).
+  min_bias_confidence_gap: 15
+  max_bias_side_mtf_score: 52
+  mismatch_min_extension_points: 12
+  mismatch_min_reversal_signals: 1
+  mismatch_min_counter_mtf_score: 43
 
 # Multi-TF candle patterns (Phase A–C) — wait until structure aligns.
 mtf_patterns:
@@ -33,9 +48,12 @@ regime:
   structure_lookback_5m: 6
   block_sideways: true
   block_high_volatility: false
-  max_risk_score_to_trade: 75
-  opening_phase_minutes: 30
-  late_phase_after_minutes: 330
+  max_risk_score_to_trade: 85
+  # Expiry labels regime but must not block entries (caution via validator + 1 lot).
+  expiry_day_risk_penalty: 0
+  # Minutes after 09:30 IST for open/late session phases (regime + cautious gates).
+  session_open_minutes: 45
+  session_late_after_minutes: 300
 
 vwap_reclaim:
   bias_timeframe: 5m
